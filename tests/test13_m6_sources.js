@@ -19,10 +19,12 @@ import { readFileSync } from "node:fs";
 
 import { StaggeredGrid } from "../geometry/grid.js";
 import { applyDocument, testRegion } from "../geometry/document.js";
-import { step, computeDivergence } from "../solver/ns2d.js";
+import { step, computeDivergence, computeContinuityError } from "../solver/ns2d.js";
 import { compileSources, sourcePlanFor, sourceLegend } from "../sources/compile.js";
 import { SOURCE_KINDS, SourceSpecError, describeSource, validateSource } from "../sources/kinds.js";
 import { FIXTURE_CASES, measureFixtureCase } from "./support/boundaryFixtures.js";
+import { buildScenario } from "../scenarios/index.js";
+import { SimulationSession } from "../ui/session.js";
 
 const GOLDEN = JSON.parse(
   readFileSync(new URL("./fixtures/golden-fields.json", import.meta.url), "utf8")
@@ -398,25 +400,249 @@ test("M6 - alpha clamps at 1, so a very fast source snaps rather than overshooti
   console.log(`[M6 step 2] tau = 1e-9, one step: peak driven face ${maxDriven.toFixed(6)} against a target of ${target}`);
 });
 
-test("M6 - mass sources are refused by the solver, not silently skipped", () => {
-  const { grid, params } = stillBox();
-  const error = captureThrow(() => step(grid, BOX, {
-    ...params,
-    sources: [{ kind: "mass", where: middleBand, rate: 0.1 }],
-  }));
-  assert.ok(error, "a mass source must not be quietly ignored");
-  assert.equal(error.name, "SourceSpecError");
-  assert.equal(error.reason, "mass-sources-not-implemented");
-  assert.match(error.message, /does not apply them yet/);
+// ---------------------------------------------------------------------------
+// Step 3 - mass sources
+// ---------------------------------------------------------------------------
+//
+// Four configurations, demonstrated before any of this was designed. Two must
+// run and two must be refused, and the pair that separates them is A and B:
+// identical sources, differing only in whether the region has an outlet. Before
+// the flux balance counted interior sources both reported a forced divergence
+// of 5.000e-2 and both were rejected - the detector was right that the region
+// was unbalanced, and the imbalance was the flux balance's own.
 
-  // The field is untouched: it refused before doing any work.
+const OPEN = { ...BOX, right: { type: "outflow" } };
+const leftSpot = { kind: "rect", x0: 0.1, y0: 0.4, x1: 0.25, y1: 0.6 };
+const rightSpot = { kind: "rect", x0: 0.75, y0: 0.4, x1: 0.9, y1: 0.6 };
+// Wide enough to catch cell centres at n = 24: they sit at 0.47917 and 0.52083.
+const DIVIDER = {
+  operations: [{ op: "add", region: { kind: "rect", x0: 0.46, y0: 0, x1: 0.54, y1: 1 } }],
+};
+
+function runMass({ bc, geometry = null, sources, steps = 60, n = 24 }) {
+  const { grid, params } = stillBox({ n });
+  if (geometry) applyDocument(grid, geometry);
+  const plan = sourcePlanFor(grid, sources);
+  let error = null;
+  let completed = 0;
+  try {
+    for (; completed < steps; completed++) step(grid, bc, { ...params, sources });
+  } catch (e) { error = e; }
+  return { grid, params, plan, error, completed };
+}
+
+test("M6 - a mass source in a region with an outlet runs, and delivers its rate", () => {
+  const rate = 0.05;
+  const { grid, params, plan, error, completed } = runMass({
+    bc: OPEN, sources: [{ kind: "mass", where: middleBand, rate }], steps: 200,
+  });
+  assert.equal(error, null, `should have run: ${error?.message}`);
+  assert.equal(completed, 200);
+
+  // Continuity holds against what was asked for.
+  const continuity = computeContinuityError(grid, plan).max;
+  assert.ok(continuity <= params.divergenceTol, `continuity error ${continuity.toExponential(3)}`);
+
+  // The raw divergence is exactly what the source imposes, on purpose - taken
+  // from the plan rather than compared against a constant, which would only be
+  // calibrated to one region size.
+  const raw = computeDivergence(grid).max;
+  const q = plan.mass.table[0].q;
+  assert.ok(
+    Math.abs(raw - q) < 1e-6,
+    `the raw divergence should be the imposed q of ${q}, got ${raw.toExponential(3)}`
+  );
+  // And the two numbers this milestone had to separate differ by seven orders
+  // of magnitude, so which one the panel shows is not a fine distinction.
+  assert.ok(raw / continuity > 1e6);
+
+  // And the volume asked for is the volume that leaves.
+  let outflow = 0;
+  for (let j = 1; j <= grid.ny; j++) outflow += grid.u[grid.idx(grid.nx, j)] * grid.h;
+  assert.ok(Math.abs(outflow - rate) < 1e-11, `asked ${rate}, delivered ${outflow}`);
+
+  console.log(
+    `[M6 step 3] A: source in an open box - continuity ${continuity.toExponential(2)}, ` +
+    `raw max|div u| ${raw.toExponential(3)} (= imposed q), ` +
+    `delivered ${outflow.toFixed(12)} against ${rate}`
+  );
+});
+
+test("M6 - a mass source in a sealed region is refused, naming the region", () => {
+  const { error } = runMass({ bc: BOX, sources: [{ kind: "mass", where: middleBand, rate: 0.05 }] });
+  assert.ok(error, "a sealed region cannot absorb a source and must be refused");
+  assert.equal(error.name, "SolverGeometryError");
+  assert.equal(error.reason, "unsolvable-region");
+  assert.equal(error.regions.length, 1);
+
+  // The detector's number is exactly the source rate per unit area of the
+  // region, which is what makes it readable rather than a magic threshold.
+  const forced = error.regions[0].forcedDivergence;
+  assert.ok(Math.abs(forced - 0.05 / 1) < 1e-9, `forcedDivergence ${forced} against rate/area 0.05`);
+  console.log(
+    `[M6 step 3] B: source in a sealed box refused - forcedDivergence ` +
+    `${forced.toExponential(4)} = rate/area`
+  );
+});
+
+test("M6 - a source and an equal sink in one sealed region run", () => {
+  const { grid, params, plan, error } = runMass({
+    bc: BOX,
+    sources: [
+      { kind: "mass", where: leftSpot, rate: 0.05 },
+      { kind: "mass", where: rightSpot, rate: -0.05 },
+    ],
+  });
+  assert.equal(error, null, `the books balance, so this must run: ${error?.message}`);
+  const continuity = computeContinuityError(grid, plan).max;
+  assert.ok(continuity <= params.divergenceTol, `continuity error ${continuity.toExponential(3)}`);
+  console.log(
+    `[M6 step 3] C: +0.05 and -0.05 in one sealed box - continuity ` +
+    `${continuity.toExponential(2)}, raw max|div u| ${computeDivergence(grid).max.toExponential(3)}`
+  );
+});
+
+test("M6 - a source and sink in DIFFERENT sealed regions are refused", () => {
+  // Globally the books balance and locally they do not, which is the whole
+  // reason the balance is per region rather than over the domain.
+  const { error } = runMass({
+    bc: BOX, geometry: DIVIDER,
+    sources: [
+      { kind: "mass", where: leftSpot, rate: 0.05 },
+      { kind: "mass", where: rightSpot, rate: -0.05 },
+    ],
+  });
+  assert.ok(error, "a globally-zero pair in two sealed chambers must still be refused");
+  assert.equal(error.name, "SolverGeometryError");
+  assert.equal(error.reason, "unsolvable-region");
+  assert.equal(error.regions.length, 2, "both chambers are unbalanceable, not just one");
+  console.log(
+    `[M6 step 3] D: source and sink either side of a wall refused - ` +
+    `${error.regions.map((r) => `region ${r.region} forces ${r.forcedDivergence.toExponential(3)}`).join(", ")}`
+  );
+});
+
+test("M6 - an unsolvable mass source is refused at every meaningful bound", () => {
+  // M5's sealed regions were benign - they ran perfectly well and were reported
+  // rather than refused. An unsolvable mass source is not: measured with every
+  // guard removed, the split-chamber case reaches max|div u| = 1.5e+6 and the
+  // field is destroyed within one step.
+  //
+  // The detector's threshold IS divergenceTol, so "meaningful" has a precise
+  // meaning here: a bound tighter than the divergence the configuration forces
+  // (1.091e-1 per chamber). Below that it is refused, either by the solvability
+  // check or, once that passes, by the divergence bound behind it.
+  const { grid, params } = stillBox();
+  const sources = [
+    { kind: "mass", where: leftSpot, rate: 0.05 },
+    { kind: "mass", where: rightSpot, rate: -0.05 },
+  ];
+  const seen = [];
+  for (const divergenceTol of [1e-7, 1e-2, 1]) {
+    const fresh = new StaggeredGrid(grid.nx, grid.ny, grid.h);
+    applyDocument(fresh, DIVIDER);
+    let threw = null;
+    try {
+      for (let n = 0; n < 5; n++) step(fresh, BOX, { ...params, sources, divergenceTol });
+    } catch (e) { threw = e; }
+    assert.ok(threw, `divergenceTol ${divergenceTol} let an unsolvable source run`);
+    seen.push(`${divergenceTol.toExponential(0)} -> ${threw.name}`);
+  }
+  console.log(`[M6 step 3] split-chamber case refused at every meaningful bound: ${seen.join(", ")}`);
+});
+
+test("M6 - at an absurd bound the CONTINUITY ERROR is the only honest readout", () => {
+  // Set divergenceTol above the divergence the configuration forces and both
+  // guards pass, because the caller has said that much error is acceptable.
+  // What the solver then produces is not a blow-up - it is worse-looking-fine:
+  // the Poisson solve meets the loose bound at p = 0, so nothing moves at all
+  // and the source delivers nothing.
+  //
+  // Every readout that existed before this milestone says the field is
+  // perfect. Peak speed 0, raw max|div u| 0, finite everywhere. The continuity
+  // error is the one number that reports the source is being ignored, because
+  // it is measured against what was ASKED for rather than against zero.
+  //
+  // This is the case that decides the contract, so it is asserted rather than
+  // argued.
+  const { grid, params } = stillBox();
+  applyDocument(grid, DIVIDER);
+  const sources = [
+    { kind: "mass", where: leftSpot, rate: 0.05 },
+    { kind: "mass", where: rightSpot, rate: -0.05 },
+  ];
+  const plan = sourcePlanFor(grid, sources);
+  for (let n = 0; n < 100; n++) {
+    step(grid, BOX, { ...params, sources, divergenceTol: 100 });
+  }
+
+  let peak = 0;
   for (let j = 1; j <= grid.ny; j++) {
     for (let i = 1; i <= grid.nx; i++) {
-      assert.equal(grid.u[grid.idx(i, j)], 0);
-      assert.equal(grid.v[grid.idx(i, j)], 0);
+      const k = grid.idx(i, j);
+      peak = Math.max(peak, Math.abs(grid.u[k]), Math.abs(grid.v[k]));
     }
   }
-  console.log(`[M6 step 2] mass sources compile and are refused by step() until demonstrated`);
+  const raw = computeDivergence(grid).max;
+  const continuity = computeContinuityError(grid, plan).max;
+  const q = Math.max(...plan.mass.table.map((r) => Math.abs(r.q)));
+
+  // Everything that looked at the field alone says it is fine.
+  assert.equal(peak, 0, "nothing moved");
+  assert.equal(raw, 0, "the raw divergence is a flawless zero");
+
+  // And the continuity error says the source delivered nothing: it is exactly
+  // the divergence that was asked for and not supplied.
+  assert.ok(
+    Math.abs(continuity - q) < 1e-9,
+    `continuity error should be the whole unmet demand ${q}, got ${continuity}`
+  );
+  console.log(
+    `[M6 step 3] divergenceTol 100: peak |u| ${peak}, raw max|div u| ${raw}, ` +
+    `continuity error ${continuity.toFixed(3)} = the entire unmet source demand`
+  );
+});
+
+test("M6 - forcedDivergence is the source rate per unit area of its region", () => {
+  // Measured across rates and across region sizes, because "equals the rate"
+  // is only true on a unit-area domain and stating it that way would be a
+  // coincidence of this grid rather than the relationship.
+  const rows = [];
+  for (const rate of [0.01, 0.05, 0.2]) {
+    const { error } = runMass({ bc: BOX, sources: [{ kind: "mass", where: middleBand, rate }], steps: 1 });
+    const forced = error.regions[0].forcedDivergence;
+    rows.push(`rate ${rate} -> ${forced.toExponential(4)}`);
+    assert.ok(Math.abs(forced / rate - 1) < 1e-9, `rate ${rate} gave ${forced}`);
+  }
+  // And on a split domain, where each chamber is 264 of 576 cells.
+  const { error } = runMass({
+    bc: BOX, geometry: DIVIDER, steps: 1,
+    sources: [
+      { kind: "mass", where: leftSpot, rate: 0.05 },
+      { kind: "mass", where: rightSpot, rate: -0.05 },
+    ],
+  });
+  const area = 264 / 576;
+  const forced = error.regions[0].forcedDivergence;
+  assert.ok(
+    Math.abs(forced - 0.05 / area) < 1e-6,
+    `a ${area.toFixed(4)}-area chamber with rate 0.05 should force ${(0.05 / area).toExponential(4)}, got ${forced.toExponential(4)}`
+  );
+  console.log(`[M6 step 3] forcedDivergence = |rate| / region area: ${rows.join(", ")}; ` +
+    `and ${forced.toExponential(4)} over an area of ${area.toFixed(4)}`);
+});
+
+test("M6 - a momentum source imposes no divergence at all", () => {
+  // The contract question is entirely about mass sources. A body force adds no
+  // volume, so every number keeps the meaning it had - which is why the two
+  // kinds are separate types rather than one with a flag.
+  const { grid, params } = stillBox();
+  const sources = [{ kind: "momentum", where: middleBand, u: 1, v: 0, relaxationTime: 0.05 }];
+  const plan = sourcePlanFor(grid, sources);
+  assert.equal(plan.mass, null);
+  for (let n = 0; n < 100; n++) step(grid, BOX, { ...params, sources });
+  assert.deepEqual(computeContinuityError(grid, plan), computeDivergence(grid));
+  assert.ok(computeDivergence(grid).max <= params.divergenceTol);
 });
 
 test("M6 - a source's dye is invisible to the solver", () => {
@@ -454,4 +680,60 @@ test("M6 - every kind declares where it is sampled and what speed it targets", (
   // Only momentum imposes a speed the timestep will have to be sized against.
   assert.equal(SOURCE_KINDS.momentum.targetSpeed({ u: 3, v: 4 }), 5);
   assert.equal(SOURCE_KINDS.mass.targetSpeed({ rate: 100 }), 0);
+});
+
+test("M6 - the session hands the solver the sources the panel is drawing", () => {
+  // Found by the browser check, not by any node test: step() takes sources
+  // through `params`, the scenario carries them at `scenario.sources`, and the
+  // session was passing `{ ...params, dt }` - so the harness compiled a plan to
+  // draw with while the solver received none.
+  //
+  // The signature is a source that is displayed and not applied: the field
+  // stays divergence-free while the continuity error reads the entire unmet
+  // demand. Measured at the time: continuity 3.20e-1 against a raw divergence
+  // of 7.8e-8, exactly inverted from what a working source produces.
+  //
+  // Asserted against the FIELD rather than against the call, because "did the
+  // argument get passed" is a proxy and "did the fluid move" is the property.
+  const scenario = buildScenario("pressure-channel");
+  const { grid } = scenario;
+  const midX = (grid.nx / 2) * grid.h;
+  const midY = (grid.ny / 2) * grid.h;
+  scenario.sources = [{
+    kind: "mass",
+    where: {
+      kind: "rect",
+      x0: midX - 3 * grid.h, y0: midY - 3 * grid.h,
+      x1: midX + 3 * grid.h, y1: midY + 3 * grid.h,
+    },
+    rate: 0.02,
+  }];
+
+  const session = new SimulationSession("pressure-channel");
+  session.scenario = scenario;
+  session.maskVersionAtReset = grid.maskVersion;
+  assert.notEqual(session.sources, null, "the session must expose the scenario's sources");
+
+  for (let n = 0; n < 40; n++) session.advance();
+
+  const plan = sourcePlanFor(grid, session.sources);
+  const raw = computeDivergence(grid).max;
+  const continuity = computeContinuityError(grid, plan).max;
+  const q = plan.mass.table[0].q;
+
+  // A source that reached the solver: the divergence IS the imposed q, and the
+  // continuity error is small. A source that did not: exactly the reverse.
+  assert.ok(
+    Math.abs(raw - q) < 1e-6,
+    `the field should carry the imposed divergence ${q}; raw max|div u| is ${raw.toExponential(3)}, ` +
+    `which means the source never reached step()`
+  );
+  assert.ok(
+    continuity < 1e-6,
+    `continuity error ${continuity.toExponential(3)} - the source is being displayed, not applied`
+  );
+  console.log(
+    `[M6 step 3] session -> solver: raw max|div u| ${raw.toExponential(3)} = imposed q, ` +
+    `continuity ${continuity.toExponential(2)}`
+  );
 });

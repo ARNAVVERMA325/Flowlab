@@ -225,7 +225,7 @@ function applySideBoundary(grid, plan, side, u, v) {
   }
 }
 
-export function applyVelocityBoundaryConditions(grid, bc, u, v) {
+export function applyVelocityBoundaryConditions(grid, bc, u, v, mass = null) {
   const plan = boundaryPlanFor(grid, bc);
 
   // The vertical sides must be done before the horizontal ones and this is not
@@ -241,7 +241,7 @@ export function applyVelocityBoundaryConditions(grid, bc, u, v) {
   applySideBoundary(grid, plan, "top", u, v);
 
   applySolidBoundaryConditions(grid, u, v, plan.surfaces);
-  return enforceFluxBalance(grid, plan, u, v);
+  return enforceFluxBalance(grid, plan, u, v, mass);
 }
 
 // No-slip on the surface of an obstacle.
@@ -394,7 +394,7 @@ function reflectTangential(neighbour, condition, component) {
 // running float sum and still is, one per region, visiting faces in the same
 // order; faces adjacent to solid carry exactly zero velocity and so
 // contribute nothing whether they are summed or skipped.
-function enforceFluxBalance(grid, plan, u, v) {
+function enforceFluxBalance(grid, plan, u, v, mass = null) {
   const { nx, ny, h, solid } = grid;
   const idx = idxFor(grid);
   const { label, count: regionCount, cellCounts } = fluidRegions(grid);
@@ -409,6 +409,35 @@ function enforceFluxBalance(grid, plan, u, v) {
 
   // Net flux counted positive *into* the domain, per region.
   const nets = new Float64Array(regionCount);
+
+  // Interior mass sources count too, and this is the sixth instance of the bug
+  // shape in working agreement item 8.
+  //
+  // Every other contribution below crosses a boundary face - a domain side or a
+  // drawn surface - so the accumulation was written as a walk over boundary
+  // faces. A mass source adds volume in the MIDDLE of a region and crosses
+  // nothing, so it contributed zero and the outflow correction came out short
+  // by exactly the source rate. Measured: a source of 0.05 in a box with an
+  // outlet, which is a perfectly solvable configuration, left every region
+  // carrying a forced divergence of 5.000e-2 and was rejected as unsolvable.
+  // With this loop it reads 1.645e-17 and runs.
+  //
+  // The filter was "is this a boundary face". The property is "does this region
+  // gain or lose volume".
+  if (mass !== null) {
+    const h2 = h * h;
+    for (let j = 1; j <= ny; j++) {
+      for (let i = 1; i <= nx; i++) {
+        const k = idx(i, j);
+        if (solid[k]) continue;
+        const row = mass.cells[k];
+        if (row < 0) continue;
+        const region = label[k];
+        if (region < 0) continue;
+        nets[region] += mass.table[row].q * h2;
+      }
+    }
+  }
   const outflowCounts = new Int32Array(regionCount);
   // A region touching a prescribed-pressure boundary determines its own flux
   // through it, so it is never "unbalanceable" in the sense the rejection
@@ -687,17 +716,29 @@ function computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G, sources = nul
 
 // Also accumulates the right-hand side per connected region, which is how each
 // region's solvability is judged - see assertRegionsAreSolvable.
-function computeRHS(grid, F, G, dt, rho, rhs, cells, regionSums) {
+function computeRHS(grid, F, G, dt, rho, rhs, cells, regionSums, mass = null) {
   const { nx, ny, h, solid } = grid;
   const idx = idxFor(grid);
   const { dirichletRHS } = cells;
   const { label } = fluidRegions(grid);
   const h2 = h * h;
+  // A mass source makes the flow deliberately non-solenoidal: the equation
+  // becomes laplacian(p) = (rho/dt) * (div u* - q), so q is subtracted from the
+  // predictor's divergence here and the projection then delivers a field whose
+  // divergence IS q at those cells rather than zero. Everything downstream that
+  // asks "how close to zero is the divergence" has to ask a different question
+  // once this is non-null - see computeContinuityError.
+  const massCells = mass === null ? null : mass.cells;
+  const massTable = mass === null ? null : mass.table;
   for (let j = 1; j <= ny; j++) {
     for (let i = 1; i <= nx; i++) {
       const k = idx(i, j);
       if (solid[k]) { rhs[k] = 0; continue; }
-      const div = (F[k] - F[idx(i - 1, j)]) / h + (G[k] - G[idx(i, j - 1)]) / h;
+      let div = (F[k] - F[idx(i - 1, j)]) / h + (G[k] - G[idx(i, j - 1)]) / h;
+      if (massCells !== null) {
+        const row = massCells[k];
+        if (row >= 0) div -= massTable[row].q;
+      }
       // The known 2*p_b/h^2 from each Dirichlet face - see scratchFor.
       rhs[k] = (rho / dt) * div - (dirichletRHS === null ? 0 : dirichletRHS[k] / h2);
       regionSums[label[k]] += rhs[k];
@@ -1164,29 +1205,6 @@ export function step(grid, bc, params) {
   const plan = boundaryPlanFor(grid, bc);
   const sourcePlan = sourcePlanFor(grid, sources);
 
-  // Mass sources compile, and are refused here.
-  //
-  // They make div u = q by design, which brings a solvability condition with
-  // real teeth: on a pure-Neumann region the integral of q must equal the net
-  // flux through that region's boundary, or no pressure field exists. The
-  // intention is to let M5's per-region detector catch that rather than build a
-  // second mechanism - but that is a prediction, and the last two predictions
-  // of this kind were both wrong in ways worth knowing about. It gets
-  // demonstrated before it gets designed around.
-  //
-  // Refused rather than ignored. A mass source that compiled cleanly and then
-  // silently did nothing is precisely the failure this codebase keeps finding,
-  // and the user's only evidence would be a flow that did not change.
-  if (sourcePlan.mass !== null) {
-    throw new SourceSpecError(
-      `${sourcePlan.massCount} mass source(s) are in this specification, and the ` +
-      `solver does not apply them yet. They are compiled and validated, but the ` +
-      `pressure equation's solvability condition for an interior mass source has ` +
-      `not been demonstrated, so applying them would be guessing. Momentum ` +
-      `sources are available and unaffected.`,
-      { reason: "mass-sources-not-implemented", count: sourcePlan.massCount }
-    );
-  }
   const { F, G, rhs, cells } = scratchFor(grid, plan);
 
   // Reject a timestep this field cannot survive, before doing any work. If the
@@ -1204,12 +1222,12 @@ export function step(grid, bc, params) {
   F.set(grid.u);
   G.set(grid.v);
   computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G, sourcePlan.momentum);
-  applyVelocityBoundaryConditions(grid, bc, F, G);
+  applyVelocityBoundaryConditions(grid, bc, F, G, sourcePlan.mass);
 
 
   const regions = fluidRegions(grid);
   const regionSums = new Float64Array(regions.count);
-  computeRHS(grid, F, G, dt, rho, rhs, cells, regionSums);
+  computeRHS(grid, F, G, dt, rho, rhs, cells, regionSums, sourcePlan.mass);
   assertRegionsAreSolvable(cells, regions, regionSums, dt, rho, divergenceTol);
   const poisson = solvePressurePoisson(grid, rhs, cells, {
     residualTol: (divergenceTol * rho) / dt,
@@ -1253,10 +1271,17 @@ export function step(grid, bc, params) {
   // -(dt/rho) times the Poisson residual, so the achieved value is already
   // known from the solve and needs no second pass over the field. The identity
   // itself is pinned by a test rather than trusted.
+  // This is the CONTINUITY ERROR, not the divergence, and the distinction only
+  // became visible with mass sources. The residual measures how far the solve
+  // is from the equation it was given, and that equation targets div u = q -
+  // so this is max|div u - q|, which is max|div u| exactly when q is zero
+  // everywhere. Measured with a source running: 8.5702e-8 here against a raw
+  // max|div u| of 1.8000e+0, and the identity holds against the former to
+  // 1.21e-18.
   const achievedDivergence = (dt / rho) * poisson.residual;
   if (enteredFinite && achievedDivergence > divergenceTol) {
     throw new SolverDivergenceError(
-      `the pressure solve could not meet the requested divergence bound: ` +
+      `the pressure solve could not meet the requested continuity bound: ` +
       `asked for ${divergenceTol.toExponential(2)}, achieved ` +
       `${achievedDivergence.toExponential(2)} after ${poisson.iterations} iterations ` +
       `(${(achievedDivergence / divergenceTol).toExponential(1)}x over). ` +
@@ -1276,13 +1301,105 @@ export function step(grid, bc, params) {
     poissonIterations: poisson.iterations,
     poissonResidual: poisson.residual,
     poissonConverged: poisson.converged,
-    // The divergence of the field this step produced, from the identity above.
-    divergence: achievedDivergence,
+    // How far the field this step produced is from the continuity it was asked
+    // for, from the identity above. Named `continuityError` rather than
+    // `divergence` because with a mass source running those are two different
+    // numbers, and the one this is has always been the former.
+    continuityError: achievedDivergence,
+    // How much divergence the sources deliberately impose, and over how many
+    // cells - zero and zero unless a mass source is active. Reported so a
+    // reader of the raw divergence can tell an imposed value from a failure.
+    imposedDivergence: sourcePlan.mass === null ? 0 : maxImposedDivergence(sourcePlan.mass),
+    imposedCells: sourcePlan.mass === null ? 0 : countImposedCells(grid, sourcePlan.mass),
   };
 }
 
-// Divergence of the velocity field at fluid cell centers - the direct
-// measure of how well incompressibility (continuity) is being satisfied.
+function maxImposedDivergence(mass) {
+  let worst = 0;
+  for (const row of mass.table) worst = Math.max(worst, Math.abs(row.q));
+  return worst;
+}
+
+function countImposedCells(grid, mass) {
+  let n = 0;
+  for (let j = 1; j <= grid.ny; j++) {
+    for (let i = 1; i <= grid.nx; i++) {
+      if (!grid.solid[grid.idx(i, j)] && mass.cells[grid.idx(i, j)] >= 0) n++;
+    }
+  }
+  return n;
+}
+
+// How far the field is from the continuity it was ASKED for: max and rms of
+// |div u - q|, where q is whatever a mass source deliberately imposes.
+//
+// This exists as a second, differently named function rather than as an
+// argument to computeDivergence, and the reason is the rule in working
+// agreement item 8. `computeDivergence` returns the divergence. Making it
+// return something else when handed an extra argument would be one name with
+// two meanings depending on a call site's details - the same shape as the six
+// bugs that rule is about, built in deliberately this time.
+//
+// The precedent is ui/fieldHealth.js, which keeps `inspection.maxSpeed` (the
+// raw quantity the colour scale needs) separate from `reportedPeakSpeed` (the
+// one the panel is allowed to show) for exactly this reason.
+//
+// The property that makes this cheap: with no mass source, q is zero
+// everywhere and this is IDENTICAL to computeDivergence - not close, identical,
+// because it is the same subtraction of the same numbers minus zero. So every
+// existing test, harness and validation claim keeps its meaning untouched.
+//
+// This is also the quantity the M1 identity is about. div_k - q_k =
+// -(dt/rho)*r_k holds per cell whether or not q is zero; it was only ever
+// written as "divergence" because q had always been zero. Measured with a
+// source running: this reads 8.5702e-8 against a raw max|div u| of 1.8000e+0,
+// and agrees with (dt/rho)*residual to 1.21e-18.
+export function computeContinuityError(grid, sources = null) {
+  const mass = sources === null ? null : (sources.mass ?? null);
+  if (mass === null) return computeDivergence(grid);
+
+  const { nx, ny, h, u, v, solid } = grid;
+  const idx = idxFor(grid);
+  let max = 0;
+  let sumSquares = 0;
+  let cells = 0;
+  let nonFiniteCells = 0;
+
+  for (let j = 1; j <= ny; j++) {
+    for (let i = 1; i <= nx; i++) {
+      const k = idx(i, j);
+      if (solid[k]) continue;
+      const row = mass.cells[k];
+      const imposed = row >= 0 ? mass.table[row].q : 0;
+      const value = Math.abs(
+        (u[k] - u[idx(i - 1, j)]) / h + (v[k] - v[idx(i, j - 1)]) / h - imposed
+      );
+      // Same rule as computeDivergence: non-finite cells are COUNTED, never
+      // folded into the maximum, because `a > max` is false for NaN and would
+      // silently skip them.
+      if (!Number.isFinite(value)) {
+        nonFiniteCells++;
+        continue;
+      }
+      cells++;
+      if (value > max) max = value;
+      sumSquares += value * value;
+    }
+  }
+
+  // Exactly computeDivergence's shape. One branch of this function delegates to
+  // it, so a field present in one and not the other would be undefined for
+  // half the callers with nothing to say so.
+  if (nonFiniteCells > 0) return { max: NaN, rms: NaN, nonFiniteCells };
+  return { max, rms: cells > 0 ? Math.sqrt(sumSquares / cells) : 0, nonFiniteCells: 0 };
+}
+
+// Divergence of the velocity field at fluid cell centers.
+//
+// This is the ACTUAL divergence, always. Where a mass source is running it is
+// meant to be non-zero there, and this reports that faithfully rather than
+// hiding it - see computeContinuityError for the question "is the projection
+// doing its job", which is a different question once q is non-zero.
 export function computeDivergence(grid) {
   const { nx, ny, h, u, v, solid } = grid;
   const idx = idxFor(grid);

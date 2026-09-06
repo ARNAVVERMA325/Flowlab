@@ -15,7 +15,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { StaggeredGrid } from "../geometry/grid.js";
-import { step, computeDivergence, SolverDivergenceError } from "../solver/ns2d.js";
+import {
+  step, computeDivergence, computeContinuityError, SolverDivergenceError,
+} from "../solver/ns2d.js";
+import { sourcePlanFor } from "../sources/compile.js";
 import {
   computeStableTimestep,
   stabilityLimits,
@@ -377,7 +380,7 @@ test("M1 - a solve that meets its bound does not throw", () => {
   const dt = computeStableTimestep(grid, { nu: params.nu, safety: 0.4 }).dt;
   const result = step(grid, bc, { ...params, dt });
   assert.equal(result.poissonConverged, true);
-  assert.ok(result.divergence <= params.divergenceTol);
+  assert.ok(result.continuityError <= params.divergenceTol);
 });
 
 test("M1 - the reported divergence is the divergence the field actually has", () => {
@@ -397,7 +400,7 @@ test("M1 - the reported divergence is the divergence the field actually has", ()
     previousTimestep = selection.dt;
     const result = step(grid, bc, { ...params, dt: selection.dt });
     const measured = computeDivergence(grid).max;
-    worstRatio = Math.max(worstRatio, Math.abs(result.divergence / measured - 1));
+    worstRatio = Math.max(worstRatio, Math.abs(result.continuityError / measured - 1));
   }
 
   console.log(`[M1 identity] reported vs measured divergence agree to ${worstRatio.toExponential(2)} relative over 120 steps`);
@@ -412,6 +415,65 @@ test("M1 - the reported divergence is the divergence the field actually has", ()
   assert.ok(
     worstRatio < 1e-4,
     `the reported divergence should match a direct scan, worst relative gap ${worstRatio}`
+  );
+});
+
+test("M1 - the identity is about the CONTINUITY ERROR, not the divergence", () => {
+  // The identity above was written as "divergence" because q had always been
+  // zero. It is not: div_k - q_k = -(dt/rho)*r_k holds per cell whether or not
+  // a source imposes q, and once one does the two are different numbers. This
+  // pins which of them step() actually returns, on a case where they differ by
+  // seven orders of magnitude - so the statement can no longer be true by the
+  // coincidence that made it ambiguous.
+  const n = 24;
+  const h = 1 / n;
+  const nu = 0.01;
+  const grid = new StaggeredGrid(n, n, h);
+  const bc = {
+    left: { type: "wall" }, right: { type: "outflow" },
+    top: { type: "wall" }, bottom: { type: "wall" },
+  };
+  const sources = [{
+    kind: "mass",
+    where: { kind: "rect", x0: 0.4, y0: 0.4, x1: 0.6, y1: 0.6 },
+    rate: 0.05,
+  }];
+  const params = {
+    nu, rho: 1, dt: 0.4 * Math.min((0.25 * h * h) / nu, h / 4),
+    divergenceTol: 1e-7, poissonMaxIterations: 20000, sources,
+  };
+  const plan = sourcePlanFor(grid, sources);
+
+  let result;
+  for (let k = 0; k < 200; k++) result = step(grid, bc, params);
+
+  const raw = computeDivergence(grid).max;
+  const continuity = computeContinuityError(grid, plan).max;
+
+  console.log(
+    `[M1 identity, q != 0] raw max|div u| ${raw.toExponential(4)}   ` +
+    `max|div u - q| ${continuity.toExponential(4)}   ` +
+    `step() reported ${result.continuityError.toExponential(4)}`
+  );
+
+  // They differ by orders of magnitude, so "which one" is a real question.
+  assert.ok(raw > 1, `the raw divergence should be about q here, got ${raw}`);
+  assert.ok(continuity < params.divergenceTol);
+
+  // And the identity holds against the continuity error, to floating point.
+  assert.ok(
+    Math.abs(result.continuityError - continuity) < 1e-12,
+    `step() returned ${result.continuityError}, a direct scan gives ${continuity}`
+  );
+  // Not against the raw divergence, which is the thing this test exists to say.
+  assert.ok(Math.abs(result.continuityError - raw) > 1);
+
+  // With no source at all the two functions are the same function.
+  const plain = new StaggeredGrid(n, n, h);
+  plain.u[plain.idx(5, 5)] = 0.3;
+  assert.deepEqual(computeContinuityError(plain, null), computeDivergence(plain));
+  assert.deepEqual(
+    computeContinuityError(plain, sourcePlanFor(plain, [])), computeDivergence(plain)
   );
 });
 
@@ -431,8 +493,8 @@ test("M1 - divergence does not accumulate over a long run", () => {
     });
     previousTimestep = selection.dt;
     const result = step(grid, bc, { ...params, dt: selection.dt });
-    worst = Math.max(worst, result.divergence);
-    if (n % 400 === 0) samples.push(`step ${n}: ${result.divergence.toExponential(2)}`);
+    worst = Math.max(worst, result.continuityError);
+    if (n % 400 === 0) samples.push(`step ${n}: ${result.continuityError.toExponential(2)}`);
   }
 
   console.log(`[M1 no drift] ${samples.join("   ")}   worst=${worst.toExponential(2)} (bound ${params.divergenceTol.toExponential(0)})`);

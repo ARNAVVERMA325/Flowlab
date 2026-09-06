@@ -79,6 +79,7 @@ export class SimulationSession {
   get bc() { return this.scenario.bc; }
   get params() { return this.scenario.params; }
   get document() { return this.editor.document; }
+  get sources() { return this.scenario.sources ?? null; }
   get canUndo() { return this.editor.canUndo; }
   get canRedo() { return this.editor.canRedo; }
 
@@ -167,7 +168,7 @@ export class SimulationSession {
       );
     }
 
-    const { grid, bc, params, timestep } = this.scenario;
+    const { grid, bc, params, timestep, sources = null } = this.scenario;
     const selection = computeStableTimestep(grid, {
       nu: params.nu,
       safety: timestep.safety,
@@ -175,7 +176,14 @@ export class SimulationSession {
     });
     this.lastTimestep = selection.dt;
     this.lastSelection = selection;
-    this.lastStep = step(grid, bc, { ...params, dt: selection.dt });
+    // `sources` lives on the scenario beside `bc`, because it is a description
+    // of the domain rather than a property of the fluid - and it has to be
+    // threaded through here explicitly. It was not, at first: the harness
+    // compiled a plan from scenario.sources to draw with while step() received
+    // params alone and saw no sources at all. The panel then reported a
+    // continuity error of 3.20e-1 next to a raw divergence of 7.8e-8, which is
+    // the signature of a source that is being displayed and not applied.
+    this.lastStep = step(grid, bc, { ...params, dt: selection.dt, sources });
     this.iteration++;
     this.simulatedTime += selection.dt;
     this.lastTracer = this.tracer.advect(grid, bc, selection.dt, {

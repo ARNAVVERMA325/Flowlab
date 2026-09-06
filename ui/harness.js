@@ -31,8 +31,9 @@
 // an edit those faces are somewhere else.
 
 import {
-  computeDivergence, boundaryPlanFor, SolverDivergenceError, SolverGeometryError,
+  computeContinuityError, boundaryPlanFor, SolverDivergenceError, SolverGeometryError,
 } from "../solver/ns2d.js";
+import { sourcePlanFor } from "../sources/compile.js";
 import { SolverStabilityError } from "../solver/stability.js";
 import { inspectField } from "../physics/fieldStats.js";
 import { FieldRenderer } from "../visualization/fieldRenderer.js";
@@ -407,7 +408,18 @@ export class Harness {
   draw() {
     const { grid } = this.scenario;
     const inspection = inspectField(grid);
-    const divergence = computeDivergence(grid);
+    // The CONTINUITY ERROR, not the raw divergence. They are the same number
+    // unless a mass source is deliberately imposing divergence, and where one
+    // is, the raw value would read ~q - measured at 1.80e+0 against a bound of
+    // 1e-7 - and tell a viewer who does not know a source is running that the
+    // solver has failed. What is imposed gets its own row instead, so the panel
+    // says a source is active rather than looking broken.
+    // Compiled from the session's sources - the same array step() is handed -
+    // so the panel cannot describe a source configuration the solver is not
+    // running. Compiling from a separate reading of the scenario is what let
+    // the two disagree the first time.
+    this.sourcePlan = sourcePlanFor(grid, this.session.sources);
+    const divergence = computeContinuityError(grid, this.sourcePlan);
     const health = assessField(inspection);
 
     // A field that has stopped being finite is a hard stop, not a warning.
@@ -461,6 +473,7 @@ export class Harness {
     set("#divmax", exponential(divergence.max, 2), isBad(divergence.max));
     set("#divrms", exponential(divergence.rms, 2), isBad(divergence.rms));
     this.updateDivergenceNote(divergence);
+    this.updateImposedDivergence();
 
     // assessField decides what may be reported; see ui/fieldHealth.js for why
     // the peak speed is not simply inspection.maxSpeed.
@@ -627,6 +640,52 @@ export class Harness {
         `obstacle interrupts. The first projection is what makes it so; press Run ` +
         `and this drops below ${exponential(bound, 0)}.`;
     }
+  }
+
+  // What the sources deliberately impose, shown only when something does.
+  //
+  // Without this the continuity error would be the whole story and a reader
+  // would have no way to tell, from the panel, that the field carries a
+  // divergence of 1.8 on purpose. The row is not a warning - an imposed
+  // divergence is the source working - so it is stated plainly rather than
+  // flagged.
+  updateImposedDivergence() {
+    const mass = this.sourcePlan?.mass ?? null;
+    const label = this.root.querySelector("#imposedlabel");
+    const value = this.root.querySelector("#imposed");
+    const note = this.root.querySelector("#imposednote");
+
+    if (mass === null) {
+      label.hidden = true;
+      value.hidden = true;
+      note.hidden = true;
+      return;
+    }
+
+    const { grid } = this.scenario;
+    let worst = 0;
+    let cells = 0;
+    for (let j = 1; j <= grid.ny; j++) {
+      for (let i = 1; i <= grid.nx; i++) {
+        const k = grid.idx(i, j);
+        if (grid.solid[k]) continue;
+        const row = mass.cells[k];
+        if (row < 0) continue;
+        cells++;
+        worst = Math.max(worst, Math.abs(mass.table[row].q));
+      }
+    }
+
+    label.hidden = false;
+    value.hidden = false;
+    value.textContent = `${exponential(worst, 2)} over ${integer(cells)} cells`;
+    note.hidden = false;
+    note.textContent =
+      `A mass source is running, so the flow is non-solenoidal on purpose at ` +
+      `those cells. The continuity error above is measured against what the ` +
+      `sources ask for, max |div u - q|, which is what says whether the ` +
+      `projection is doing its job; the raw max |div u| would read about ` +
+      `${exponential(worst, 2)} and mean nothing is wrong.`;
   }
 
   updateTracerReadouts() {
