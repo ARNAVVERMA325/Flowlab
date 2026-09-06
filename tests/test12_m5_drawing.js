@@ -329,12 +329,26 @@ test("the eraser is a subtract of the same shape, tinted differently", () => {
   assert.notDeepEqual(painted, addPainted);
 });
 
-test("every tool has a label, and only select makes nothing", () => {
+test("every tool has a label, and one that makes no geometry says what it does", () => {
+  // `makes: null` used to mean "this is the select tool". M6 added a brush and
+  // a source placer, which also make no geometry but are not select - so the
+  // rule is now that a tool either builds a document operation or declares the
+  // `kind` of thing it does instead. A tool that did neither would be a palette
+  // button wired to nothing, which is what this is guarding.
   for (const [id, tool] of Object.entries(DRAW_TOOLS)) {
     assert.equal(typeof tool.label, "string");
     assert.ok(tool.label.length > 0, id);
-    assert.equal(tool.makes === null, id === "select");
+    if (tool.makes === null) {
+      assert.ok(
+        id === "select" || typeof tool.kind === "string",
+        `${id} makes no geometry and does not say what it does instead`
+      );
+    } else {
+      assert.equal(typeof tool.makes, "function", id);
+    }
   }
+  assert.equal(DRAW_TOOLS.brush.kind, "momentum");
+  assert.equal(DRAW_TOOLS.placeSource.kind, "place");
 });
 
 test("describeOperation names what was drawn", () => {

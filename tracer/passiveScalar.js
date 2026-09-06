@@ -67,6 +67,8 @@
 // Sweby-form van Leer limiter. psi(r) <= min(2r, 2) is what makes the scheme
 // TVD under forward Euler; r <= 0 means a local extremum, where the limiter
 // must drop the slope entirely and fall back to donor cell.
+import { injectSourceDye } from "./sourceDye.js";
+
 export function vanLeer(r) {
   if (!Number.isFinite(r) || r <= 0) return 0;
   return (r + Math.abs(r)) / (1 + Math.abs(r));
@@ -77,6 +79,12 @@ export function vanLeer(r) {
 export function donorCell() {
   return 0;
 }
+
+// The concentration a fully dyed cell carries. The seed functions produce 0 or
+// 1, so this is the range the colour scale is built around, and an interior
+// source is clamped to it: a cell allowed to accumulate without bound would
+// flatten the scale for everything else and show nothing.
+export const MAX_CONCENTRATION = 1;
 
 export class PassiveTracer {
   // maxCFL is the tracer's OWN stability bound, not the solver's. 0.5 is the
@@ -181,15 +189,26 @@ export class PassiveTracer {
       Number.isFinite(cfl) && cfl > this.maxCFL ? Math.ceil(cfl / this.maxCFL) : 1;
 
     const sub = dt / substeps;
+    let injected = { added: 0, cells: 0 };
     for (let n = 0; n < substeps; n++) {
       this.applyBoundary(grid, bc, options.inject);
       this.advance(grid, sub);
+      // Interior sources release dye per SUBSTEP, at dye*sub, so the total over
+      // the step is dye*dt whether the tracer subdivided once or eleven times.
+      // Releasing dye*dt inside the loop would multiply it by the substep count
+      // - which varies with the flow, so the dye would depend on how fast the
+      // fluid happened to be moving.
+      if (options.sources) {
+        const round = injectSourceDye(this, grid, options.sources, sub, MAX_CONCENTRATION);
+        injected = { added: injected.added + round.added, cells: round.cells };
+      }
     }
 
     this.lastCFL = cfl;
     this.lastSubsteps = substeps;
+    this.lastInjected = injected;
     this.steps++;
-    return { cfl, substeps, dt };
+    return { cfl, substeps, dt, injected };
   }
 
   // The Courant number that actually governs this update.

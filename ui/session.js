@@ -58,6 +58,8 @@ import { tracerConfigFor } from "../tracer/seeds.js";
 import { step } from "../solver/ns2d.js";
 import { computeStableTimestep } from "../solver/stability.js";
 import { sourcePlanFor } from "../sources/compile.js";
+import { combineSources } from "./brush.js";
+import { validateSource } from "../sources/kinds.js";
 import { buildScenario } from "../scenarios/index.js";
 
 export class StaleFieldError extends Error {
@@ -76,6 +78,9 @@ export class SimulationSession {
     this.pristineGeometry = scenario.geometry;
     this.editor = new GeometryEditor(scenario.geometry);
     this.boundaries = this.#makeBoundaryEditor(scenario);
+    this.placedSources = scenario.sources ?? [];
+    this.brushSource = null;
+    this.#rebuildSources();
     this.reset();
   }
 
@@ -89,7 +94,89 @@ export class SimulationSession {
   get canRedoBoundary() { return this.boundaries.canRedo; }
   get params() { return this.scenario.params; }
   get document() { return this.editor.document; }
-  get sources() { return this.scenario.sources ?? null; }
+
+  // The combined array - placed sources plus whatever the brush is applying -
+  // held rather than recomputed on read.
+  //
+  // That is a performance requirement, not a style choice. sourcePlanFor caches
+  // on the array's identity, and step() plus the timestep selection each ask
+  // for a plan on every step. Building a fresh array per READ would miss the
+  // cache eight times a frame at four steps per frame, and a compile on the
+  // largest grid here costs 0.872 ms against 0.0003 ms for a hit. Rebuilt only
+  // when something actually changes, that becomes one compile per pointer move.
+  get sources() { return this._sources; }
+
+  #rebuildSources() {
+    this._sources = combineSources(this.placedSources, this.brushSource);
+  }
+
+  // Compiling the candidate is the validation, not just checking its shape.
+  //
+  // validateSource only says the object is well formed; whether it selects any
+  // face the solver would update is a question about the GRID, and it is
+  // answered by compileSources. Checking only the shape let a source placed
+  // inside the cylinder pass here and throw later from inside draw(), as an
+  // uncaught page error - found by the browser check, because the throw came
+  // from somewhere no caller was guarding.
+  #compiles(candidate) {
+    sourcePlanFor(this.scenario.grid, candidate);
+  }
+
+  // The brush hands its live source in here. Null while the pointer is up, or
+  // while it is down but has not moved far enough to have a direction.
+  //
+  // A stroke dragged over a wall produces a source covering no fluid face. That
+  // is not an error to report - it is the brush not pushing anything, which is
+  // what should happen there - so it is held as "no source" and the panel says
+  // "armed" rather than "pushing". The distinction is visible, not silent.
+  setBrushSource(source) {
+    if (source === null && this.brushSource === null) return false;
+    let next = source;
+    if (next !== null) {
+      try {
+        this.#compiles(combineSources(this.placedSources, next));
+      } catch {
+        next = null;
+      }
+    }
+    if (next === null && this.brushSource === null) return false;
+    this.brushSource = next;
+    this.#rebuildSources();
+    return true;
+  }
+
+  // Placed sources are replaced, never mutated - the same rule as the boundary
+  // specification, for the same reason: the compiled plan is cached on the
+  // array, so editing one in place would leave the solver running the previous
+  // configuration.
+  addSource(source) {
+    validateSource(source, `sources[${this.placedSources.length}]`);
+    const next = [...this.placedSources, source];
+    // Compiled before it is accepted, so an impossible source is refused here -
+    // where the caller is guarding - rather than thrown later from a redraw.
+    this.#compiles(combineSources(next, this.brushSource));
+    this.placedSources = next;
+    this.#rebuildSources();
+    return true;
+  }
+
+  removeSource(index) {
+    if (!Number.isInteger(index) || index < 0 || index >= this.placedSources.length) {
+      throw new RangeError(
+        `cannot remove source ${index}: there are ${this.placedSources.length}`
+      );
+    }
+    this.placedSources = this.placedSources.filter((_, n) => n !== index);
+    this.#rebuildSources();
+    return true;
+  }
+
+  clearSources() {
+    if (this.placedSources.length === 0) return false;
+    this.placedSources = [];
+    this.#rebuildSources();
+    return true;
+  }
   get canUndo() { return this.editor.canUndo; }
   get canRedo() { return this.editor.canRedo; }
 
@@ -207,8 +294,9 @@ export class SimulationSession {
       );
     }
 
-    const { grid, params, timestep, sources = null } = this.scenario;
+    const { grid, params, timestep } = this.scenario;
     const bc = this.bc;
+    const sources = this.sources;
     const selection = computeStableTimestep(grid, {
       nu: params.nu,
       safety: timestep.safety,
@@ -232,6 +320,9 @@ export class SimulationSession {
     this.simulatedTime += selection.dt;
     this.lastTracer = this.tracer.advect(grid, bc, selection.dt, {
       inject: this.tracerConfig.inject,
+      // The dye a source carries is read here and nowhere below the display
+      // layer: sources/ never looks at it, which tests/test9 enforces.
+      sources,
     });
     return this.lastStep;
   }
@@ -248,6 +339,11 @@ export class SimulationSession {
     // the same domain, and discarding them because a wall moved would lose
     // work for no reason.
     this.boundaries = this.#makeBoundaryEditor(scenario);
+    // Sources describe places in a particular domain, so a scenario change
+    // discards them exactly as it discards a geometry document.
+    this.placedSources = scenario.sources ?? [];
+    this.brushSource = null;
+    this.#rebuildSources();
     return this.reset();
   }
 }

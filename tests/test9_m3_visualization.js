@@ -95,18 +95,65 @@ test("M3 - advecting the tracer does not write to any solver field", () => {
   }
 });
 
+// Removes line and block comments so the seal below is checked against code.
+// Deliberately simple: these files contain no regex literals and no string
+// holding "//", so a character scan is exact for them, and a parser would be a
+// dependency bought to answer a question this already answers.
+function stripComments(source) {
+  let out = "";
+  let inLine = false;
+  let inBlock = false;
+  let inString = null;
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i];
+    const next = source[i + 1];
+    if (inLine) {
+      if (c === "\n") { inLine = false; out += c; }
+      continue;
+    }
+    if (inBlock) {
+      if (c === "*" && next === "/") { inBlock = false; i++; }
+      continue;
+    }
+    if (inString) {
+      if (c === "\\") { out += c + (next ?? ""); i++; continue; }
+      if (c === inString) inString = null;
+      out += c;
+      continue;
+    }
+    if (c === "/" && next === "/") { inLine = true; i++; continue; }
+    if (c === "/" && next === "*") { inBlock = true; i++; continue; }
+    if (c === '"' || c === "'" || c === "`") inString = c;
+    out += c;
+  }
+  return out;
+}
+
 test("M3 - the solver source tree does not reference the tracer", () => {
   // The structural half of the same guarantee: deleting tracer/ must not break
   // anything below the display layer. A grep is a blunt instrument but it
   // fails loudly the moment someone reaches for the dye from inside the
   // physics, which is the mistake worth catching early.
-  const sealed = ["solver", "geometry", "physics", "scenarios"];
+  // sources/ and boundaries/ joined this list when M4 and M6 moved physics
+  // configuration out of scenarios/ - they are read by the solver every step,
+  // so a dye reference in either would be exactly the coupling this forbids.
+  // The dye a source carries is therefore read in tracer/, not where the source
+  // is compiled.
+  const sealed = ["solver", "geometry", "physics", "scenarios", "sources", "boundaries"];
   const offenders = [];
   for (const dir of sealed) {
     for (const file of readdirSync(dir)) {
       const path = join(dir, file);
       if (!statSync(path).isFile() || !file.endsWith(".js")) continue;
-      if (/\btracer\b/i.test(readFileSync(path, "utf8"))) offenders.push(path);
+      const source = readFileSync(path, "utf8");
+      // Comments are stripped first. The check was a bare grep over the whole
+      // file, and it caught a COMMENT in sources/kinds.js that explains why a
+      // source's dye is deliberately invisible here - a false positive on the
+      // prose that documents the very rule being enforced. A test that fires on
+      // its own explanation gets loosened, so it is made precise instead: what
+      // is forbidden is code that reaches for the dye, not writing down that it
+      // must not.
+      if (/\btracer\b/i.test(stripComments(source))) offenders.push(path);
     }
   }
   assert.deepEqual(offenders, [], `these files reference the tracer and must not: ${offenders}`);

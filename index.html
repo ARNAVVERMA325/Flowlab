@@ -220,6 +220,33 @@
       </div>
 
       <div class="panel">
+        <h2>Sources</h2>
+        <div class="bcedit" style="margin-top:0;padding-top:0;border-top:none">
+          <div class="bcfields">
+            <label>speed<input id="brushspeed" type="number" step="any" value="1.5"></label>
+            <label>radius<input id="brushradius" type="number" step="any" value="3"></label>
+            <label>relax<input id="brushrelax" type="number" step="any" value="0.05"></label>
+            <label>dye<input id="brushdye" type="number" step="any" value="0"></label>
+          </div>
+          <p class="vnote">The brush takes its DIRECTION from the drag, which the
+          canvas mapping gives exactly, and its SPEED from this control. Pointer
+          events are wall-clock and the fluid runs in simulated seconds, and the
+          ratio between them varies by more than thirty times across these
+          scenarios &mdash; so "the fluid moves with your hand" needs an invented
+          constant, and this asks for it instead of hiding it.</p>
+          <div class="bcbuttons">
+            <button id="clearsources">Clear sources</button>
+          </div>
+        </div>
+        <dl>
+          <dt>placed</dt><dd id="srccount">-</dd>
+          <dt>brush</dt><dd id="srcbrush">-</dd>
+          <dt>dye released</dt><dd id="srcdye">-</dd>
+        </dl>
+        <div id="srclist"></div>
+      </div>
+
+      <div class="panel">
         <h2>Geometry</h2>
         <dl>
           <dt>tool</dt><dd id="geomtool">-</dd>

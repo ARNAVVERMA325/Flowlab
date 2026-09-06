@@ -28,6 +28,9 @@ import {
 import { FIXTURE_CASES, measureFixtureCase } from "./support/boundaryFixtures.js";
 import { buildScenario } from "../scenarios/index.js";
 import { SimulationSession } from "../ui/session.js";
+import { BrushController, combineSources } from "../ui/brush.js";
+import { PassiveTracer, MAX_CONCENTRATION } from "../tracer/passiveScalar.js";
+import { dyeSourcesFor, injectSourceDye } from "../tracer/sourceDye.js";
 
 const GOLDEN = JSON.parse(
   readFileSync(new URL("./fixtures/golden-fields.json", import.meta.url), "utf8")
@@ -698,11 +701,11 @@ test("M6 - the session hands the solver the sources the panel is drawing", () =>
   //
   // Asserted against the FIELD rather than against the call, because "did the
   // argument get passed" is a proxy and "did the fluid move" is the property.
-  const scenario = buildScenario("pressure-channel");
-  const { grid } = scenario;
+  const session = new SimulationSession("pressure-channel");
+  const { grid } = session;
   const midX = (grid.nx / 2) * grid.h;
   const midY = (grid.ny / 2) * grid.h;
-  scenario.sources = [{
+  session.addSource({
     kind: "mass",
     where: {
       kind: "rect",
@@ -710,12 +713,8 @@ test("M6 - the session hands the solver the sources the panel is drawing", () =>
       x1: midX + 3 * grid.h, y1: midY + 3 * grid.h,
     },
     rate: 0.02,
-  }];
-
-  const session = new SimulationSession("pressure-channel");
-  session.scenario = scenario;
-  session.maskVersionAtReset = grid.maskVersion;
-  assert.notEqual(session.sources, null, "the session must expose the scenario's sources");
+  });
+  assert.notEqual(session.sources, null, "the session must expose its sources");
 
   for (let n = 0; n < 40; n++) session.advance();
 
@@ -859,16 +858,13 @@ test("M6 - the session sizes its timestep against the sources it is running", ()
   // Asserted through the session rather than the solver, because this is the
   // path the app actually takes - and the last integration gap in this
   // milestone was exactly a value the session failed to thread through.
-  const scenario = buildScenario("cavity");
-  const { grid } = scenario;
-  scenario.sources = [{
+  const session = new SimulationSession("cavity");
+  const { grid } = session;
+  session.addSource({
     kind: "momentum",
     where: { kind: "rect", x0: 0.3, y0: 0.3, x1: 0.7, y1: 0.7 },
     u: 8, v: 0, relaxationTime: 0.02,
-  }];
-  const session = new SimulationSession("cavity");
-  session.scenario = scenario;
-  session.maskVersionAtReset = grid.maskVersion;
+  });
 
   session.advance();
   const withSource = session.lastSelection;
@@ -882,4 +878,323 @@ test("M6 - the session sizes its timestep against the sources it is running", ()
     `[M6 step 4] session with a target-8 brush chose dt ${withSource.dt.toExponential(3)} ` +
     `against ${plain.lastSelection.dt.toExponential(3)} without it`
   );
+});
+
+// ---------------------------------------------------------------------------
+// Step 6 - the brush, and dye released by a source
+// ---------------------------------------------------------------------------
+
+function brushFor(grid, options = {}) {
+  const scale = 6;
+  const margin = 9;
+  const layout = {
+    rect: { left: 0, top: 0, width: grid.nx * scale + 2 * margin, height: grid.ny * scale + 2 * margin },
+    canvasWidth: grid.nx * scale + 2 * margin,
+    canvasHeight: grid.ny * scale + 2 * margin,
+    margin, scale, h: grid.h, nx: grid.nx, ny: grid.ny,
+  };
+  const seen = [];
+  const brush = new BrushController({
+    getLayout: () => layout,
+    onChange: (source) => seen.push(source),
+    ...options,
+  });
+  const at = (x, y) => [
+    margin + (x / grid.h) * scale,
+    margin + (grid.ny - y / grid.h) * scale,
+  ];
+  return { brush, seen, at, layout };
+}
+
+test("M6 - a press with no movement drives nothing, because it has no direction", () => {
+  // "No movement means stop the fluid" would turn press-and-hold into a brake -
+  // a different tool wearing this one's clothes. There is no direction yet, so
+  // there is no source yet.
+  const { grid } = stillBox({ n: 24 });
+  const { brush, at } = brushFor(grid);
+  assert.equal(brush.down(...at(0.5, 0.5)), true);
+  assert.equal(brush.source, null, "a press alone must not invent a direction");
+
+  // A movement below the threshold is still not a direction.
+  brush.move(...at(0.5 + grid.h / 8, 0.5));
+  assert.equal(brush.source, null);
+
+  // Past it, there is one.
+  brush.move(...at(0.7, 0.5));
+  const source = brush.source;
+  assert.notEqual(source, null);
+  assert.equal(source.kind, "momentum");
+  assert.ok(source.u > 0 && Math.abs(source.v) < 1e-9, "dragged +x, so it pushes +x");
+  assert.ok(
+    Math.abs(Math.hypot(source.u, source.v) - brush.settings.speed) < 1e-9,
+    "the magnitude comes from the control, not from how fast the pointer moved"
+  );
+});
+
+test("M6 - the brush's speed is the control's, whatever the gesture", () => {
+  // Direction from the drag, which the canvas mapping gives exactly; magnitude
+  // from a control, because pointer time is wall-clock and fluid time is not.
+  const { grid } = stillBox({ n: 24 });
+  const { brush, at } = brushFor(grid);
+  brush.setSetting("speed", 3);
+  brush.down(...at(0.2, 0.2));
+  brush.move(...at(0.9, 0.9));
+  const fast = brush.source;
+  brush.up();
+
+  brush.down(...at(0.2, 0.2));
+  brush.move(...at(0.25, 0.25));   // a much shorter drag, same direction
+  const slow = brush.source;
+
+  assert.ok(Math.abs(Math.hypot(fast.u, fast.v) - 3) < 1e-9);
+  assert.ok(Math.abs(Math.hypot(slow.u, slow.v) - 3) < 1e-9);
+  assert.ok(Math.abs(fast.u - slow.u) < 1e-9, "same direction gives the same target");
+
+  // And a rejected setting leaves the previous one in place.
+  assert.equal(brush.setSetting("speed", -1), false);
+  assert.equal(brush.setSetting("speed", NaN), false);
+  assert.equal(brush.settings.speed, 3);
+});
+
+test("M6 - releasing the brush leaves nothing behind", () => {
+  const { grid } = stillBox({ n: 24 });
+  const { brush, at } = brushFor(grid);
+  brush.down(...at(0.5, 0.5));
+  brush.move(...at(0.8, 0.5));
+  assert.notEqual(brush.source, null);
+  assert.equal(brush.up(), true);
+  assert.equal(brush.source, null);
+  assert.equal(brush.stroking, false);
+});
+
+test("M6 - combineSources returns a new array only when the brush is live", () => {
+  // The plan cache keys on the array, so the array must change when the sources
+  // change and NOT change when they do not - a fresh array on every read would
+  // miss the cache eight times a frame.
+  const placed = [{ kind: "momentum", where: middleBand, u: 1, v: 0, relaxationTime: 0.1 }];
+  assert.equal(combineSources(placed, null), placed, "no brush: the same array back");
+  assert.equal(combineSources([], null), null, "nothing at all compiles to nothing");
+
+  const brushSource = { kind: "momentum", where: middleBand, u: 2, v: 0, relaxationTime: 0.05 };
+  const combined = combineSources(placed, brushSource);
+  assert.notEqual(combined, placed);
+  assert.equal(combined.length, 2);
+  assert.equal(combined[0], placed[0], "placed entries are shared, only the array is new");
+});
+
+test("M6 - the session rebuilds its source array on change and not on read", () => {
+  const session = new SimulationSession("cavity");
+  const first = session.sources;
+  assert.equal(session.sources, first, "reading twice must give the same array");
+
+  session.addSource({
+    kind: "momentum", where: { kind: "rect", x0: 0.3, y0: 0.3, x1: 0.7, y1: 0.7 },
+    u: 1, v: 0, relaxationTime: 0.05,
+  });
+  const withPlaced = session.sources;
+  assert.notEqual(withPlaced, first);
+  assert.equal(session.sources, withPlaced);
+
+  session.setBrushSource({
+    kind: "momentum", where: { kind: "rect", x0: 0.1, y0: 0.1, x1: 0.2, y1: 0.2 },
+    u: 2, v: 0, relaxationTime: 0.05,
+  });
+  assert.equal(session.sources.length, 2);
+  session.setBrushSource(null);
+  assert.equal(session.sources.length, 1);
+  session.removeSource(0);
+  assert.equal(session.sources, null);
+});
+
+test("M6 - a brush stroke actually moves the fluid through the session", () => {
+  const session = new SimulationSession("cavity");
+  const { grid } = session;
+  const before = Array.from(grid.u);
+
+  session.setBrushSource({
+    kind: "momentum",
+    where: { kind: "disk", cx: 0.5, cy: 0.5, radius: 0.12, metric: "squared", closed: true },
+    u: 1, v: 0, relaxationTime: 0.05,
+  });
+  for (let n = 0; n < 30; n++) session.advance();
+
+  assert.notDeepEqual(Array.from(grid.u), before, "the stroke must reach the solver");
+  const continuity = computeContinuityError(grid, sourcePlanFor(grid, session.sources)).max;
+  assert.ok(continuity <= session.params.divergenceTol, `continuity ${continuity.toExponential(3)}`);
+
+  // And letting go stops it driving.
+  session.setBrushSource(null);
+  assert.equal(session.sources, null);
+  console.log(`[M6 step 6] a brush stroke through the session: continuity ${continuity.toExponential(2)}`);
+});
+
+// ---------------------------------------------------------------------------
+// Dye on sources - and the seal
+// ---------------------------------------------------------------------------
+
+test("M6 - a source's dye reaches the tracer and nothing else", () => {
+  const session = new SimulationSession("cavity");
+  const where = { kind: "disk", cx: 0.5, cy: 0.5, radius: 0.1, metric: "squared", closed: true };
+  session.tracer.clear();
+  session.addSource({ kind: "momentum", where, u: 1, v: 0, relaxationTime: 0.05, dye: 4 });
+
+  const before = session.tracer.total(session.grid).total;
+  for (let n = 0; n < 20; n++) session.advance();
+  const after = session.tracer.total(session.grid).total;
+
+  assert.ok(after > before, `dye should have been released: ${before} -> ${after}`);
+  assert.ok(session.lastTracer.injected.cells > 0);
+  console.log(
+    `[M6 step 6] source dye: total ${before.toFixed(4)} -> ${after.toFixed(4)} over ` +
+    `${session.lastTracer.injected.cells} cells`
+  );
+});
+
+test("M6 - dye on a source leaves the flow bit-identical", () => {
+  // The M3 guarantee, extended to the new place dye can come from. If this ever
+  // fails, a display feature has started changing the physics.
+  const run = (dye) => {
+    const session = new SimulationSession("cavity");
+    session.addSource({
+      kind: "momentum",
+      where: { kind: "disk", cx: 0.5, cy: 0.5, radius: 0.1, metric: "squared", closed: true },
+      u: 1, v: 0, relaxationTime: 0.05,
+      ...(dye === null ? {} : { dye }),
+    });
+    for (let n = 0; n < 25; n++) session.advance();
+    const { grid } = session;
+    return [Array.from(grid.u), Array.from(grid.v), Array.from(grid.p)];
+  };
+  const plain = run(null);
+  assert.deepEqual(run(0.5), plain, "dye changed the flow");
+  assert.deepEqual(run(50), plain, "a large dye release changed the flow");
+});
+
+test("M6 - source dye is released per unit time, not per substep", () => {
+  // The tracer subdivides its own step when its CFL bound is tighter than the
+  // one it was handed - eleven substeps on an impulsive start. Releasing dye*dt
+  // inside that loop would multiply the release by the substep count, so how
+  // much dye appeared would depend on how fast the fluid happened to be moving.
+  const grid = new StaggeredGrid(20, 20, 0.05);
+  const where = { kind: "rect", x0: 0.2, y0: 0.2, x1: 0.8, y1: 0.8 };
+  const sources = [{ kind: "mass", where, rate: 1, dye: 2 }];
+
+  // Agreement to roundoff, not bit-identity: summing dye*dt/n n times is a
+  // different sequence of additions from one dye*dt, and the last bit differs.
+  // Measured worst difference across substep counts, against a release of 0.2:
+  //   2 -> 0.000e+0, 10 -> 2.776e-17, 11 -> 2.776e-17, 100 -> 1.388e-16.
+  // The bound below is two orders above the largest of those, which is far
+  // tighter than the bug it exists to catch - releasing dye*dt per substep
+  // would multiply the total by the substep count.
+  const worstOver = (substeps) => {
+    const single = new PassiveTracer(grid);
+    const many = new PassiveTracer(grid);
+    injectSourceDye(single, grid, sources, 0.1, 1);
+    for (let n = 0; n < substeps; n++) injectSourceDye(many, grid, sources, 0.1 / substeps, 1);
+    let worst = 0;
+    for (let k = 0; k < single.c.length; k++) {
+      worst = Math.max(worst, Math.abs(single.c[k] - many.c[k]));
+    }
+    return worst;
+  };
+  for (const substeps of [2, 10, 11, 100]) {
+    const worst = worstOver(substeps);
+    assert.ok(
+      worst < 1e-14,
+      `${substeps} substeps differ from one release by ${worst.toExponential(3)}`
+    );
+  }
+  console.log(
+    `[M6 step 6] dye release is substep-invariant: worst difference over 2, 10, 11 and ` +
+    `100 substeps is ${worstOver(100).toExponential(2)} against a release of 0.2`
+  );
+});
+
+test("M6 - dye accumulation is clamped rather than flattening the colour scale", () => {
+  const grid = new StaggeredGrid(20, 20, 0.05);
+  const sources = [{
+    kind: "momentum", where: { kind: "rect", x0: 0.2, y0: 0.2, x1: 0.8, y1: 0.8 },
+    u: 1, v: 0, relaxationTime: 0.05, dye: 1000,
+  }];
+  const tracer = new PassiveTracer(grid);
+  for (let n = 0; n < 50; n++) injectSourceDye(tracer, grid, sources, 0.01, MAX_CONCENTRATION);
+  let peak = 0;
+  for (const value of tracer.c) peak = Math.max(peak, value);
+  assert.equal(peak, MAX_CONCENTRATION, `dye ran to ${peak}, past the scale's ceiling`);
+});
+
+test("M6 - the dye selection is cached and follows the geometry", () => {
+  const grid = new StaggeredGrid(20, 20, 0.05);
+  const sources = [{
+    kind: "momentum", where: { kind: "rect", x0: 0.2, y0: 0.2, x1: 0.8, y1: 0.8 },
+    u: 1, v: 0, relaxationTime: 0.05, dye: 1,
+  }];
+  const first = dyeSourcesFor(grid, sources);
+  assert.equal(dyeSourcesFor(grid, sources), first, "the same array is not rescanned");
+
+  // A wall through the middle removes cells from the selection.
+  applyDocument(grid, {
+    operations: [{ op: "add", region: { kind: "rect", x0: 0.4, y0: 0, x1: 0.6, y1: 1 } }],
+  });
+  const second = dyeSourcesFor(grid, sources);
+  assert.notEqual(second, first, "a mask change must rescan");
+  assert.ok(second.entries[0].cells.length < first.entries[0].cells.length);
+
+  // A source with no dye is not in the selection at all.
+  assert.equal(dyeSourcesFor(grid, [{ ...sources[0], dye: 0 }]), null);
+  assert.equal(dyeSourcesFor(grid, []), null);
+});
+
+test("M6 - a source that cannot compile is refused where it is added", () => {
+  // Found by the browser check, and it is a placement bug rather than a
+  // validation one: validateSource says whether an object is well formed, and
+  // whether it selects any face the solver would update is a question about the
+  // GRID. Checking only the shape let a source placed inside the cylinder pass
+  // and then throw from inside draw(), as an uncaught page error - a throw from
+  // somewhere no caller was guarding.
+  const session = new SimulationSession("cylinder");
+  const inTheBody = {
+    kind: "momentum",
+    where: { kind: "disk", cx: 3.5, cy: 73 / 24, radius: 0.1, metric: "squared", closed: true },
+    u: 1, v: 0, relaxationTime: 0.05,
+  };
+  const error = captureThrow(() => session.addSource(inTheBody));
+  assert.ok(error, "a source inside a solid must be refused when it is added");
+  assert.equal(error.name, "SourceSpecError");
+  assert.equal(error.reason, "empty-selection");
+  assert.equal(session.placedSources.length, 0, "and must not be recorded");
+
+  // The session is still usable afterwards - the rejection left nothing behind.
+  assert.doesNotThrow(() => session.advance());
+});
+
+test("M6 - a brush dragged over a wall holds no source rather than throwing", () => {
+  // The same situation, arrived at transiently. Here it is not an error to
+  // report: a brush over a wall pushing nothing is what should happen, and the
+  // panel distinguishes "armed" from "pushing" so it is visible rather than
+  // silent.
+  const session = new SimulationSession("cylinder");
+  const overFluid = {
+    kind: "momentum",
+    where: { kind: "disk", cx: 8, cy: 3, radius: 0.25, metric: "squared", closed: true },
+    u: 1, v: 0, relaxationTime: 0.05,
+  };
+  const overTheBody = {
+    kind: "momentum",
+    where: { kind: "disk", cx: 3.5, cy: 73 / 24, radius: 0.1, metric: "squared", closed: true },
+    u: 1, v: 0, relaxationTime: 0.05,
+  };
+
+  session.setBrushSource(overFluid);
+  assert.notEqual(session.brushSource, null);
+  assert.equal(session.sources.length, 1);
+
+  assert.doesNotThrow(() => session.setBrushSource(overTheBody));
+  assert.equal(session.brushSource, null, "over a wall the brush drives nothing");
+  assert.equal(session.sources, null);
+
+  // And it picks back up when the stroke returns to fluid.
+  session.setBrushSource(overFluid);
+  assert.notEqual(session.brushSource, null);
+  assert.doesNotThrow(() => session.advance());
 });

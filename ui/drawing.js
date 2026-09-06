@@ -31,6 +31,22 @@ export const DRAW_TOOLS = {
     label: "Erase circle",
     makes: (a, b) => TOOLS.eraseCircle(a.x, a.y, Math.hypot(b.x - a.x, b.y - a.y)),
   },
+  // Two tools that do not produce geometry at all. They are listed here so the
+  // palette has one source of truth for what is on it, and carry `makes: null`
+  // so the drawing controller ignores them - the harness routes their pointer
+  // events to ui/brush.js, which has the opposite lifecycle.
+  brush: {
+    label: "Brush",
+    makes: null,
+    kind: "momentum",
+    hint: "drag on the fluid to push it",
+  },
+  placeSource: {
+    label: "Place source",
+    makes: null,
+    kind: "place",
+    hint: "click to place a source at that point",
+  },
 };
 
 // Preview colours. Additions read as the solid they will become; erasures read

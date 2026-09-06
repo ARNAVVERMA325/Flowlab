@@ -46,6 +46,9 @@ import { fluidRegions } from "../geometry/regions.js";
 import { BOUNDARY_TYPES, SIDES } from "../boundaries/conditions.js";
 import { fieldsFor } from "../boundaries/editor.js";
 import { DRAW_TOOLS, DrawingController, describeOperation, regionTint } from "./drawing.js";
+import { clampToDomain, isInsideDomain, screenToPhysical } from "./canvasMapping.js";
+import { BRUSH_DEFAULTS, BrushController } from "./brush.js";
+import { describeSource } from "../sources/kinds.js";
 import {
   prepareView,
   FIELD_SOURCES,
@@ -91,6 +94,15 @@ export class Harness {
     this.drawing = new DrawingController({
       getLayout: () => this.layout(),
       onCommit: (operation) => this.commitEdit(() => this.session.applyEdit(operation)),
+    });
+    // The brush is a separate controller because its lifecycle is the opposite:
+    // a geometry gesture commits on release, a brush exists only while the
+    // pointer is down. It never touches the geometry document.
+    this.brush = new BrushController({
+      getLayout: () => this.layout(),
+      onChange: (source) => {
+        if (this.session.setBrushSource(source)) this.draw();
+      },
     });
 
     this.validation = new ValidationPanel(root);
@@ -298,29 +310,69 @@ export class Harness {
     // stopping wherever the pointer crossed the edge.
     const canvas = root.querySelector("#field");
     canvas.addEventListener("pointerdown", (event) => {
+      const tool = this.pointerTool;
+      if (tool === "placeSource") {
+        canvas.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        this.placeSourceAt(event.clientX, event.clientY);
+        return;
+      }
+      if (tool === "brush") {
+        if (!this.brush.down(event.clientX, event.clientY)) return;
+        canvas.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        this.draw();
+        return;
+      }
       if (!this.drawing.down(event.clientX, event.clientY)) return;
       canvas.setPointerCapture(event.pointerId);
       event.preventDefault();
       this.draw();
     });
     canvas.addEventListener("pointermove", (event) => {
+      if (this.pointerTool === "brush") {
+        if (this.brush.move(event.clientX, event.clientY)) this.draw();
+        return;
+      }
       if (this.drawing.move(event.clientX, event.clientY)) this.draw();
     });
     canvas.addEventListener("pointerup", (event) => {
-      if (this.drawing.anchor === null) return;
       if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+      if (this.pointerTool === "brush") {
+        if (this.brush.up()) this.draw();
+        return;
+      }
+      if (this.drawing.anchor === null) return;
       // up() commits through onCommit, which redraws. It returns false for a
       // gesture too small to make a shape, which still has to clear the
       // preview off the canvas.
       if (!this.drawing.up()) this.draw();
     });
     canvas.addEventListener("pointercancel", () => {
+      if (this.brush.cancel()) this.draw();
       if (this.drawing.cancel()) this.draw();
     });
     // Escape abandons a drag. The gesture is not the document, so nothing
     // reaches the undo stack and there is nothing to undo afterwards.
     window.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && this.drawing.cancel()) this.draw();
+      if (event.key !== "Escape") return;
+      if (this.brush.cancel()) this.draw();
+      if (this.drawing.cancel()) this.draw();
+    });
+
+    for (const [id, name] of [
+      ["#brushspeed", "speed"], ["#brushradius", "radius"], ["#brushrelax", "relaxationTime"],
+    ]) {
+      const input = root.querySelector(id);
+      input.value = String(BRUSH_DEFAULTS[name]);
+      input.addEventListener("change", () => {
+        if (!this.brush.setSetting(name, Number(input.value))) {
+          input.value = String(this.brush.settings[name]);
+        }
+      });
+    }
+    root.querySelector("#clearsources").addEventListener("click", () => {
+      if (this.session.clearSources()) this.draw();
     });
   }
 
@@ -343,9 +395,17 @@ export class Harness {
     };
   }
 
+  // Which controller a pointer event goes to. The brush and the source placer
+  // make no geometry, so the drawing controller is parked on "select" while
+  // either is armed rather than being asked to understand them.
+  get pointerTool() { return this.armedTool ?? "select"; }
+
   setTool(id) {
-    if (!this.drawing.setTool(id)) return;
-    this.root.querySelector("#field").classList.toggle("drawing", DRAW_TOOLS[id].makes !== null);
+    this.armedTool = id;
+    const geometry = DRAW_TOOLS[id].makes !== null;
+    this.drawing.setTool(geometry ? id : "select");
+    if (!geometry) this.brush.cancel();
+    this.root.querySelector("#field").classList.toggle("drawing", id !== "select");
     this.draw();
   }
 
@@ -639,6 +699,7 @@ export class Harness {
     root.querySelector("#pause").disabled = this.state !== "running";
 
     this.updateTracerReadouts();
+    this.updateSourcePanel();
     this.updateBoundaryPanel();
     this.updateGeometryPanel();
     this.updateLegend(view);
@@ -813,6 +874,100 @@ export class Harness {
       `sources ask for, max |div u - q|, which is what says whether the ` +
       `projection is doing its job; the raw max |div u| would read about ` +
       `${exponential(worst, 2)} and mean nothing is wrong.`;
+  }
+
+  // Places a persistent source where the pointer went down. The kind and its
+  // parameters come from the same controls the brush uses, so what is placed is
+  // what the brush would have applied - one set of numbers, not two.
+  placeSourceAt(clientX, clientY) {
+    const layout = this.layout();
+    const point = screenToPhysical(clientX, clientY, layout);
+    if (!isInsideDomain(point, layout, layout.h / 2)) return false;
+    const { x, y } = clampToDomain(point, layout);
+    const { speed, radius, relaxationTime } = this.brush.settings;
+    const dye = Number(this.root.querySelector("#brushdye").value);
+    const source = {
+      kind: "momentum",
+      label: "placed",
+      where: {
+        kind: "disk", cx: x, cy: y, radius: radius * layout.h,
+        metric: "squared", closed: true,
+      },
+      // Placed sources push along +x by default; the list lets you remove one
+      // and the controls let you change the speed before placing the next.
+      u: speed, v: 0,
+      relaxationTime,
+      ...(Number.isFinite(dye) && dye > 0 ? { dye } : {}),
+    };
+    try {
+      this.session.addSource(source);
+    } catch (error) {
+      // A source covering no updatable face is refused by the compiler with a
+      // reason - most often placed inside a wall - and saying so beats a click
+      // that appears to do nothing.
+      this.editMessage = `source rejected: ${error.message}`;
+      this.draw();
+      return false;
+    }
+    this.draw();
+    return true;
+  }
+
+  // What sources are doing, drawn from the session's own array - the one the
+  // solver is handed - rather than from a second reading of the controls.
+  updateSourcePanel() {
+    const { root, session } = this;
+    const set = (id, text, bad = false) => {
+      const node = root.querySelector(id);
+      node.textContent = text;
+      node.classList.toggle("bad", bad);
+    };
+
+    const placed = session.placedSources;
+    set("#srccount", placed.length === 0 ? "none" : integer(placed.length));
+
+    const brush = session.brushSource;
+    set(
+      "#srcbrush",
+      brush === null
+        ? (this.pointerTool === "brush" ? "armed - drag on the fluid" : "-")
+        : `pushing (${fixed(brush.u, 2)}, ${fixed(brush.v, 2)})`
+    );
+
+    const injected = this.lastTracer?.injected;
+    set(
+      "#srcdye",
+      injected && injected.cells > 0
+        ? `${exponential(injected.added, 2)} into ${integer(injected.cells)} cells`
+        : "none"
+    );
+
+    root.querySelector("#clearsources").disabled = placed.length === 0;
+
+    const list = root.querySelector("#srclist");
+    const signature = placed.map((s) => describeSource(s)).join("|");
+    if (list.dataset.builtFor === signature) return;
+    list.innerHTML = "";
+    placed.forEach((source, index) => {
+      const row = document.createElement("div");
+      row.className = "geomrow";
+      const label = document.createElement("span");
+      label.className = "gindex";
+      label.textContent = String(index + 1);
+      const text = document.createElement("span");
+      text.className = "gtext";
+      text.textContent = describeSource(source);
+      const drop = document.createElement("button");
+      drop.className = "gdrop";
+      drop.textContent = "remove";
+      drop.addEventListener("click", () => {
+        session.removeSource(index);
+        this.draw();
+      });
+      row.append(label, text, drop);
+      list.appendChild(row);
+    });
+    list.dataset.builtFor = signature;
   }
 
   updateTracerReadouts() {
