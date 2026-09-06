@@ -4,7 +4,7 @@
 
 Every number below was measured by running the solver through the same harnesses the test suite uses (`validation/measure.js`), and compared against references declared in `validation/registry.js`. A hand-maintained validation record can drift from the code while still reading as authority, which is the one failure mode a document like this must not have.
 
-Generated 2026-08-28 19:09:37 UTC.
+Generated 2026-09-06 17:20:32 UTC.
 
 ## How to read this
 
@@ -17,6 +17,8 @@ Generated 2026-08-28 19:09:37 UTC.
 The distinction carries real weight. A cavity agreeing with published measurements and a bend separating where physical reasoning says it should are not the same kind of claim, and presenting them identically would mislead by omission.
 
 **Every number below describes that case's own geometry.** The harness can now draw into a domain, and a measurement made on one domain says nothing about another. When the geometry on screen differs from the scenario's own, the panel withdraws these numbers rather than annotating them. What still holds on any domain the solver accepts are its own invariants — divergence, flux balance, finiteness — which the harness reports live.
+
+**A number here is about the flow the solver computed, not about how realistic the configuration is.** M6 added sources that inject momentum or mass into the interior. A source delivers exactly what it is asked for and the projection still meets its bound around one — both measured below — but nothing here says a source resembles a pump, a nozzle or a hand in water. It is a boundary condition applied in the middle of the domain.
 
 **Reference verification** — how far the reference itself can be trusted:
 
@@ -36,6 +38,7 @@ The distinction carries real weight. A cavity agreeing with published measuremen
 | 90-degree channel bend | `self-validated` | planePoiseuille | `derived` |
 | Pressure-driven channel | `benchmarked` | planePoiseuille | `derived` |
 | Drawn geometry and surface conditions | `self-validated` | invariants only | — |
+| Interior sources | `self-validated` | invariants only | — |
 
 ## Still water
 
@@ -199,6 +202,23 @@ The M5 geometry pipeline, checked against exact invariants only. Two things are 
 | velocity on drawn solid surfaces | 0 | 0<br><sub>the block's other faces, which carry plain no-slip</sub> | 0 | pass |
 | max\|div u\| with a surface inlet driving the flow | 0 | 9.399e-8<br><sub>after 300 steps</sub> | 1.000e-7 | pass |
 
+## Interior sources
+
+**Classification:** `self-validated` — checked against exact invariants and its own grid convergence; nothing external says the answer is right
+
+**Asserted by:** `tests/test13_m6_sources.js`
+
+The M6 source model, against exact invariants only. Three things are established. A MASS source delivers the volume it asks for: the flux leaving through the outlet equals the requested rate to twelve digits, which is a real check because nothing prescribes that flux - the projection determines it. A MOMENTUM source cannot carry a face past its target, which is what makes the timestep sizeable against it and is checked at relaxation times from far below the timestep to far above it. And the solver still delivers its continuity bound with a source driving the flow - measured against what the sources ask for, max |div u - q|, because with a mass source running max|div u| is q by design and reads 1.8 where the bound is 1e-7.
+
+> ⚠️ **Caveat.** Nothing here is benchmarked and nothing here validates a source's PHYSICAL realism - a source is a boundary condition applied in the interior, not a model of a pump or a nozzle, and no external reference says what one should do. These are invariants. The brush's speed is a control rather than a measurement of hand motion, for the reason given in docs/M6-sources.md: pointer time is wall-clock and fluid time is simulated, so any mapping between them is invented.
+
+| quantity | reference | measured | tolerance | result |
+|---|---|---|---|---|
+| mass source: flux delivered vs requested | 0 | 6.939e-18<br><sub>asked for 0.05, the outlet carried 0.050000000000</sub> | 1.000e-11 | pass |
+| continuity error with a source driving the flow | 0 | 8.570e-8<br><sub>max\|div u - q\|; the raw max\|div u\| is 1.800e+0, which is the divergence the source imposes on purpose</sub> | 1.000e-7 | pass |
+| momentum source: overshoot past its target in one step | 0 | 0<br><sub>relaxation times from 1e-9 to 10 against a timestep of 4.167e-3</sub> | 0 | pass |
+| golden fields moved by compiling the source path in | 0 | 0<br><sub>13 cases, asserted byte-identical in tests/test13_m6_sources.js</sub> | 0 | pass |
+
 ## Known limitations
 
 Carried forward from `docs/M1-solver-hardening.md`, which has the detail:
@@ -213,6 +233,8 @@ Carried forward from `docs/M1-solver-hardening.md`, which has the detail:
 From `docs/M3-visualization.md`, and bearing on what this document does NOT cover: the dye tracer added in M3 is a visualization aid, not a result. No case below validates it, nothing external says a dye pattern is right, and the harness labels it accordingly. The pressure view shows the first-order Chorin projection pressure, which is not the true pressure near walls.
 
 From `docs/M4-boundary-conditions.md`: the outlet condition is zero-gradient with a per-region flux rescale, which reflects vortices back into the domain - adequate for the steady cases validated here, and a real limitation for unsteady wakes. A convective outflow was deferred rather than adopted, because changing it would perturb the cylinder benchmark.
+
+From `docs/M6-sources.md`: with a mass source running the flow is non-solenoidal ON PURPOSE at the cells it covers, so `max|div u|` there is q by design and the quantity that says whether the projection is working is the CONTINUITY ERROR, `max|div u - q|`. The two are the same number whenever no mass source is active, which is every case below. A momentum source cannot carry a face past its target in one step, which is what lets the timestep be sized against it; a boundary inlet has no such bound, so the first step of an impulsively started scenario is still taken outside the limit the driver believes it is enforcing - measured at CFL 5.145 on the sharp bend, and left recorded rather than fixed.
 
 From `docs/M5-interactive-geometry.md`: drawn shapes are SAMPLED onto the existing uniform grid - cell centres tested against a region - not meshed, so the staircase limitation above applies to anything drawn as much as to the cylinder. Solid surfaces can now carry the full condition set where they are axis-aligned; on a staircase surface, which has no single normal, only wall and free-slip are allowed and a flux-prescribing condition is refused rather than approximated. A domain whose fluid splits into regions is solved when every region's flux can be absorbed and REJECTED WITH A REASON when it cannot, rather than reported as converged; the pre-M5 solver reported 8.1e-8 for a field whose actual max|div u| was 2.950e-1 in one such case. The outer domain stays a rectangle and per-region pressure solving is deferred.
 

@@ -103,6 +103,15 @@ async function main() {
     "flux balance, finiteness — which the harness reports live."
   );
   lines.push("");
+  lines.push(
+    "**A number here is about the flow the solver computed, not about how " +
+    "realistic the configuration is.** M6 added sources that inject momentum or " +
+    "mass into the interior. A source delivers exactly what it is asked for and " +
+    "the projection still meets its bound around one — both measured below — but " +
+    "nothing here says a source resembles a pump, a nozzle or a hand in water. " +
+    "It is a boundary condition applied in the middle of the domain."
+  );
+  lines.push("");
   lines.push("**Reference verification** — how far the reference itself can be trusted:");
   lines.push("");
   for (const [name, meaning] of Object.entries(VERIFICATION_BADGE)) {
@@ -242,6 +251,19 @@ async function main() {
     "adequate for the steady cases validated here, and a real limitation for " +
     "unsteady wakes. A convective outflow was deferred rather than adopted, " +
     "because changing it would perturb the cylinder benchmark."
+  );
+  lines.push("");
+  lines.push(
+    "From `docs/M6-sources.md`: with a mass source running the flow is " +
+    "non-solenoidal ON PURPOSE at the cells it covers, so `max|div u|` there is " +
+    "q by design and the quantity that says whether the projection is working " +
+    "is the CONTINUITY ERROR, `max|div u - q|`. The two are the same number " +
+    "whenever no mass source is active, which is every case below. A momentum " +
+    "source cannot carry a face past its target in one step, which is what lets " +
+    "the timestep be sized against it; a boundary inlet has no such bound, so " +
+    "the first step of an impulsively started scenario is still taken outside " +
+    "the limit the driver believes it is enforcing - measured at CFL 5.145 on " +
+    "the sharp bend, and left recorded rather than fixed."
   );
   lines.push("");
   lines.push(

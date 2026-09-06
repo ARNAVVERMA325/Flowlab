@@ -240,6 +240,9 @@ visible.
   on mixed normals refused rather than approximated. See
   `docs/M5-interactive-geometry.md` §5.
 - **Time-varying and arbitrary-profile inlets** — M6 territory.
+  *M6 delivered neither.* What it added was a way to EDIT a boundary condition
+  from the UI, which the numerics here already supported; time-varying inlets
+  remain deferred. See `docs/M6-sources.md` §0 and §7.
 
 ## Two bugs worth recording
 

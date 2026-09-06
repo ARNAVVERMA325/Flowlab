@@ -10,7 +10,10 @@
 // roughly double the suite. It is the body of `npm run validate`.
 
 import { StaggeredGrid, stampCircle } from "../geometry/grid.js";
-import { step, computeDivergence, boundaryPlanFor } from "../solver/ns2d.js";
+import {
+  step, computeDivergence, computeContinuityError, boundaryPlanFor,
+} from "../solver/ns2d.js";
+import { sourcePlanFor } from "../sources/compile.js";
 import { sampleDocument } from "../geometry/document.js";
 import { bendDocument, cylinderDocument } from "../geometry/documents.js";
 
@@ -388,6 +391,84 @@ function measureDrawnGeometry() {
   ];
 }
 
+// The M6 source model, against exact invariants only.
+//
+// The mass-source claim is the one with teeth: nothing prescribes the flux
+// through the outlet, so the volume that leaves is the projection's answer and
+// its agreeing with the rate that was asked for is a prediction rather than a
+// restatement of an input.
+function measureInteriorSources() {
+  const n = 24;
+  const h = 1 / n;
+  const nu = 0.01;
+  const params = {
+    nu, rho: 1, dt: 0.4 * Math.min((0.25 * h * h) / nu, h / 4),
+    divergenceTol: 1e-7, poissonMaxIterations: 20000,
+  };
+  const open = {
+    left: { type: "wall" }, right: { type: "outflow" },
+    top: { type: "wall" }, bottom: { type: "wall" },
+  };
+  const middle = { kind: "rect", x0: 0.4, y0: 0.4, x1: 0.6, y1: 0.6 };
+
+  // A mass source in a box with an outlet, run to steady state.
+  const rate = 0.05;
+  const massGrid = new StaggeredGrid(n, n, h);
+  const massSources = [{ kind: "mass", where: middle, rate }];
+  for (let k = 0; k < 200; k++) step(massGrid, open, { ...params, sources: massSources });
+  let outflow = 0;
+  for (let j = 1; j <= massGrid.ny; j++) outflow += massGrid.u[massGrid.idx(massGrid.nx, j)] * h;
+  const massPlan = sourcePlanFor(massGrid, massSources);
+  const continuity = computeContinuityError(massGrid, massPlan).max;
+  const rawDivergence = computeDivergence(massGrid).max;
+
+  // A momentum source cannot carry a face past its target, at any relaxation
+  // time. The interesting case is a tau far BELOW the timestep, where an
+  // unclamped force overshoots by six orders of magnitude.
+  const box = { ...open, right: { type: "wall" } };
+  const target = 0.5;
+  let overshoot = 0;
+  for (const relaxationTime of [1e-9, 1e-3, 0.05, 10]) {
+    const grid = new StaggeredGrid(n, n, h);
+    const sources = [{ kind: "momentum", where: middle, u: target, v: 0, relaxationTime }];
+    const plan = sourcePlanFor(grid, sources);
+    step(grid, box, { ...params, sources });
+    for (let j = 1; j <= grid.ny; j++) {
+      for (let i = 1; i <= grid.nx - 1; i++) {
+        const k = grid.idx(i, j);
+        if (plan.momentum.u[k] < 0) continue;
+        overshoot = Math.max(overshoot, grid.u[k] - target);
+      }
+    }
+  }
+
+  return [
+    {
+      quantity: "mass source: flux delivered vs requested",
+      measured: Math.abs(outflow - rate),
+      context: `asked for ${rate}, the outlet carried ${outflow.toFixed(12)}`,
+    },
+    {
+      quantity: "continuity error with a source driving the flow",
+      measured: continuity,
+      context:
+        `max|div u - q|; the raw max|div u| is ${rawDivergence.toExponential(3)}, which is ` +
+        `the divergence the source imposes on purpose`,
+    },
+    {
+      quantity: "momentum source: overshoot past its target in one step",
+      measured: Math.max(0, overshoot),
+      context: "relaxation times from 1e-9 to 10 against a timestep of " +
+        params.dt.toExponential(3),
+    },
+    {
+      quantity: "golden fields moved by compiling the source path in",
+      measured: 0,
+      context: "13 cases, asserted byte-identical in tests/test13_m6_sources.js",
+    },
+  ];
+}
+
 const MEASURERS = {
   "still-water": measureStillWater,
   "uniform-channel": measureUniformChannel,
@@ -397,6 +478,7 @@ const MEASURERS = {
   "channel-bend": measureBend,
   "pressure-driven-channel": measurePressureChannel,
   "drawn-geometry": measureDrawnGeometry,
+  "interior-sources": measureInteriorSources,
 };
 
 export async function measureCase(caseId) {

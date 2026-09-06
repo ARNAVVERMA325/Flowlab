@@ -411,6 +411,10 @@ measurement, so the two cannot describe different computations.
   approximated (§5).
 - **Convective outflow** — still open from M4, unchanged.
 
+*M6 note:* the flux balance described in §4 counts boundary faces, and interior
+mass sources cross none — the sixth instance of §6's bug shape, found and fixed
+in M6. See `docs/M6-sources.md` §4.
+
 ## Two things worth recording
 
 **A wrong explanation that was plausible.** The circle-convention difference was

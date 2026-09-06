@@ -346,6 +346,38 @@ export const CASES = [
       { quantity: "max|div u| with a surface inlet driving the flow", reference: 0, tolerance: 1e-7, referenceType: "invariant" },
     ],
   },
+  {
+    id: "interior-sources",
+    label: "Interior sources",
+    classification: "self-validated",
+    measuredBy: "tests/test13_m6_sources.js",
+    rationale:
+      "The M6 source model, against exact invariants only. Three things are " +
+      "established. A MASS source delivers the volume it asks for: the flux " +
+      "leaving through the outlet equals the requested rate to twelve digits, " +
+      "which is a real check because nothing prescribes that flux - the " +
+      "projection determines it. A MOMENTUM source cannot carry a face past " +
+      "its target, which is what makes the timestep sizeable against it and is " +
+      "checked at relaxation times from far below the timestep to far above " +
+      "it. And the solver still delivers its continuity bound with a source " +
+      "driving the flow - measured against what the sources ask for, max " +
+      "|div u - q|, because with a mass source running max|div u| is q by " +
+      "design and reads 1.8 where the bound is 1e-7.",
+    caveat:
+      "Nothing here is benchmarked and nothing here validates a source's " +
+      "PHYSICAL realism - a source is a boundary condition applied in the " +
+      "interior, not a model of a pump or a nozzle, and no external reference " +
+      "says what one should do. These are invariants. The brush's speed is a " +
+      "control rather than a measurement of hand motion, for the reason given " +
+      "in docs/M6-sources.md: pointer time is wall-clock and fluid time is " +
+      "simulated, so any mapping between them is invented.",
+    claims: [
+      { quantity: "mass source: flux delivered vs requested", reference: 0, tolerance: 1e-11, referenceType: "invariant" },
+      { quantity: "continuity error with a source driving the flow", reference: 0, tolerance: 1e-7, referenceType: "invariant" },
+      { quantity: "momentum source: overshoot past its target in one step", reference: 0, tolerance: 0, referenceType: "invariant" },
+      { quantity: "golden fields moved by compiling the source path in", reference: 0, tolerance: 0, referenceType: "invariant" },
+    ],
+  },
 ];
 
 // Harness scenarios map onto cases. A scenario the panel can show but that no

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-28 19:09:37 UTC",
+  "generatedAt": "2026-09-06 17:20:32 UTC",
   "cases": {
     "still-water": {
       "label": "Still water",
@@ -375,6 +375,51 @@
           "reference": 0,
           "measured": 9.398658884496314e-8,
           "tolerance": 1e-7,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        }
+      ]
+    },
+    "interior-sources": {
+      "label": "Interior sources",
+      "classification": "self-validated",
+      "reference": null,
+      "caveat": "Nothing here is benchmarked and nothing here validates a source's PHYSICAL realism - a source is a boundary condition applied in the interior, not a model of a pump or a nozzle, and no external reference says what one should do. These are invariants. The brush's speed is a control rather than a measurement of hand motion, for the reason given in docs/M6-sources.md: pointer time is wall-clock and fluid time is simulated, so any mapping between them is invented.",
+      "measuredBy": "tests/test13_m6_sources.js",
+      "claims": [
+        {
+          "quantity": "mass source: flux delivered vs requested",
+          "reference": 0,
+          "measured": 6.938893903907228e-18,
+          "tolerance": 1e-11,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "continuity error with a source driving the flow",
+          "reference": 0,
+          "measured": 8.570185938000519e-8,
+          "tolerance": 1e-7,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "momentum source: overshoot past its target in one step",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 0,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "golden fields moved by compiling the source path in",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 0,
           "relative": false,
           "referenceType": "invariant",
           "result": "pass"
