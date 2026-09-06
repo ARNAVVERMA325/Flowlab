@@ -7,6 +7,8 @@
     "test": "node --test tests/*.js",
     "serve": "node scripts/serve.js",
     "validate": "node scripts/generate-validation-doc.js",
-    "golden": "node scripts/generate-golden-fields.js"
+    "golden": "node scripts/generate-golden-fields.js",
+    "browser": "node --test tests/browser/*.js",
+    "verify": "npm test && npm run browser"
   }
 }
