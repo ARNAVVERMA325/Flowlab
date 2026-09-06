@@ -50,6 +50,8 @@
 // press the edit button".
 
 import { GeometryEditor } from "../geometry/editor.js";
+import { BoundaryEditor } from "../boundaries/editor.js";
+import { compileBoundaryConditions } from "../boundaries/compile.js";
 import { sampleDocument } from "../geometry/document.js";
 import { PassiveTracer } from "../tracer/passiveScalar.js";
 import { tracerConfigFor } from "../tracer/seeds.js";
@@ -73,11 +75,18 @@ export class SimulationSession {
     // domain on screen is still the one anything was validated against.
     this.pristineGeometry = scenario.geometry;
     this.editor = new GeometryEditor(scenario.geometry);
+    this.boundaries = this.#makeBoundaryEditor(scenario);
     this.reset();
   }
 
   get grid() { return this.scenario.grid; }
-  get bc() { return this.scenario.bc; }
+  // The EDITOR's specification, not the scenario's own. They start identical
+  // and diverge the moment a boundary is edited, and everything - the solver,
+  // the overlay, the flux readout - has to read the same one or the picture of
+  // what is applied stops matching what is applied.
+  get bc() { return this.boundaries.spec; }
+  get canUndoBoundary() { return this.boundaries.canUndo; }
+  get canRedoBoundary() { return this.boundaries.canRedo; }
   get params() { return this.scenario.params; }
   get document() { return this.editor.document; }
   get sources() { return this.scenario.sources ?? null; }
@@ -112,6 +121,35 @@ export class SimulationSession {
     this.geometryMatchesScenario = this.#sameDomainAsScenario();
     return this;
   }
+
+  // Compiling against the live grid is the validation: a specification the
+  // compiler refuses never reaches the editor's history, so undo can never
+  // land on something that will not run.
+  #makeBoundaryEditor(scenario) {
+    return new BoundaryEditor(scenario.bc, (spec) => {
+      compileBoundaryConditions(this.scenario?.grid ?? scenario.grid, spec);
+    });
+  }
+
+  // A boundary edit KEEPS THE FIELD and does not stop the run.
+  //
+  // The opposite of a geometry edit, and measured rather than assumed: on a
+  // settled channel, opening a wall into an inlet, turning an inlet from 1 to
+  // 4, closing an inlet, and swapping a wall for free-slip all hold the
+  // divergence bound over the following 120 steps with no restart. The domain
+  // still exists and the field is still a valid state of it; what changed is a
+  // real physical event the solver is entitled to march through.
+  //
+  // A change that makes the domain unsolvable - sealing the only outlet while
+  // an inlet runs - is refused by assertRegionsAreSolvable on the next step,
+  // which is the same machinery that refuses it in a scenario definition.
+  setBoundary(side, condition) {
+    this.boundaries.setSide(side, condition);
+    return true;
+  }
+
+  undoBoundary() { return this.boundaries.undo(); }
+  redoBoundary() { return this.boundaries.redo(); }
 
   // Whether the domain is still the scenario's own.
   //
@@ -169,7 +207,8 @@ export class SimulationSession {
       );
     }
 
-    const { grid, bc, params, timestep, sources = null } = this.scenario;
+    const { grid, params, timestep, sources = null } = this.scenario;
+    const bc = this.bc;
     const selection = computeStableTimestep(grid, {
       nu: params.nu,
       safety: timestep.safety,
@@ -201,8 +240,14 @@ export class SimulationSession {
   // no meaning in another of a different size and shape.
   load(scenarioId) {
     this.scenarioId = scenarioId;
-    this.pristineGeometry = buildScenario(scenarioId).geometry;
+    const scenario = buildScenario(scenarioId);
+    this.pristineGeometry = scenario.geometry;
     this.editor = new GeometryEditor(this.pristineGeometry);
+    // Rebuilt only on a scenario change. A geometry edit calls reset(), and
+    // boundary edits must survive that: they describe the same four sides of
+    // the same domain, and discarding them because a wall moved would lose
+    // work for no reason.
+    this.boundaries = this.#makeBoundaryEditor(scenario);
     return this.reset();
   }
 }

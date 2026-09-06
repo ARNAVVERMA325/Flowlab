@@ -43,6 +43,8 @@ import {
 } from "../visualization/boundaryOverlay.js";
 import { analyseRegions, describeRegions } from "../boundaries/regionAnalysis.js";
 import { fluidRegions } from "../geometry/regions.js";
+import { BOUNDARY_TYPES, SIDES } from "../boundaries/conditions.js";
+import { fieldsFor } from "../boundaries/editor.js";
 import { DRAW_TOOLS, DrawingController, describeOperation, regionTint } from "./drawing.js";
 import {
   prepareView,
@@ -141,6 +143,127 @@ export class Harness {
     mode.addEventListener("change", () => this.setMode(mode.value));
 
     this.bindDrawingControls();
+    this.bindBoundaryControls();
+  }
+
+  // The boundary editor. Unlike a geometry edit this does NOT stop the run or
+  // rebuild the field - see ui/session.js for the measurements that settled
+  // that. Opening a valve on a running flow is a thing the solver can march
+  // through, and watching it happen is the point.
+  bindBoundaryControls() {
+    const { root } = this;
+
+    const sideSelect = root.querySelector("#bcside");
+    for (const side of SIDES) {
+      const option = document.createElement("option");
+      option.value = side;
+      option.textContent = side;
+      sideSelect.appendChild(option);
+    }
+
+    const typeSelect = root.querySelector("#bctype");
+    for (const [id, spec] of Object.entries(BOUNDARY_TYPES)) {
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = spec.label;
+      typeSelect.appendChild(option);
+    }
+
+    // Changing either selector re-derives the form from the type table, so a
+    // new type or a new parameter shows up without anyone editing this file.
+    sideSelect.addEventListener("change", () => this.syncBoundaryForm());
+    typeSelect.addEventListener("change", () => this.renderBoundaryFields());
+
+    root.querySelector("#bcapply").addEventListener("click", () => this.applyBoundaryEdit());
+    root.querySelector("#bcundo").addEventListener("click", () =>
+      this.commitBoundary(() => this.session.undoBoundary()));
+    root.querySelector("#bcredo").addEventListener("click", () =>
+      this.commitBoundary(() => this.session.redoBoundary()));
+  }
+
+  // Fills the form from whatever the chosen side currently carries, so the
+  // starting point is what is applied rather than a blank.
+  syncBoundaryForm() {
+    const side = this.root.querySelector("#bcside").value;
+    const current = this.session.bc[side];
+    // A segmented side has no single type; the editor replaces whole sides, so
+    // it offers the first segment's type as a starting point and says so.
+    const condition = Array.isArray(current) ? current[0] : current;
+    this.root.querySelector("#bctype").value = condition.type;
+    this.renderBoundaryFields(condition, Array.isArray(current));
+  }
+
+  renderBoundaryFields(condition = null, segmented = false) {
+    const side = this.root.querySelector("#bcside").value;
+    const type = this.root.querySelector("#bctype").value;
+    const spec = fieldsFor(type, side);
+    const host = this.root.querySelector("#bcfields");
+    host.innerHTML = "";
+
+    for (const field of [...spec.required, ...spec.optional]) {
+      const required = spec.required.includes(field);
+      const label = document.createElement("label");
+      label.className = required ? "req" : "";
+      label.textContent = field + (required ? "*" : "");
+      const input = document.createElement("input");
+      input.dataset.field = field;
+      input.dataset.required = String(required);
+      // `profile` is the one non-numeric parameter; everything else is a number.
+      input.type = field === "profile" ? "text" : "number";
+      input.step = "any";
+      const existing = condition?.[field];
+      input.value = existing === undefined ? "" : String(existing);
+      input.placeholder = required ? "required" : "default";
+      label.appendChild(input);
+      host.appendChild(label);
+    }
+
+    const hint = this.root.querySelector("#bcedithint");
+    hint.classList.remove("bad");
+    hint.textContent = segmented
+      ? `${side} is segmented; applying replaces the whole side. ${spec.summary}`
+      : spec.summary;
+  }
+
+  applyBoundaryEdit() {
+    const side = this.root.querySelector("#bcside").value;
+    const type = this.root.querySelector("#bctype").value;
+    const condition = { type };
+    for (const input of this.root.querySelectorAll("#bcfields input")) {
+      const raw = input.value.trim();
+      if (raw === "") {
+        if (input.dataset.required === "true") {
+          this.showBoundaryError(`${input.dataset.field} is required for this type`);
+          return;
+        }
+        continue;
+      }
+      condition[input.dataset.field] = input.type === "number" ? Number(raw) : raw;
+    }
+    this.commitBoundary(() => this.session.setBoundary(side, condition));
+  }
+
+  showBoundaryError(message) {
+    const hint = this.root.querySelector("#bcedithint");
+    hint.textContent = message;
+    hint.classList.add("bad");
+  }
+
+  // A boundary edit re-derives the plan and redraws, and deliberately does not
+  // touch this.state: a run in progress keeps running through the change.
+  commitBoundary(apply) {
+    try {
+      if (!apply()) return false;
+    } catch (error) {
+      // The editor validates by compiling, so an impossible specification is
+      // refused with the compiler's own message and the history is untouched.
+      this.showBoundaryError(error.message);
+      return false;
+    }
+    this.plan = boundaryPlanFor(this.scenario.grid, this.session.bc);
+    this.syncBoundaryForm();
+    this.draw();
+    return true;
   }
 
   bindDrawingControls() {
@@ -297,6 +420,7 @@ export class Harness {
     this.drawing.cancel();
 
     this.syncScenario();
+    this.syncBoundaryForm();
     this.root.querySelector("#note").textContent = this.scenario.note;
     this.renderValidation();
     this.draw();
@@ -312,7 +436,10 @@ export class Harness {
     // picture of what is applied where cannot disagree with what is applied.
     // Compiling separately for the display would be two implementations of one
     // rule.
-    this.plan = boundaryPlanFor(grid, this.scenario.bc);
+    // From the session's specification, which is the editor's - the same object
+    // step() is handed. Reading scenario.bc here would draw the scenario's
+    // original boundaries over a solver running the edited ones.
+    this.plan = boundaryPlanFor(grid, this.session.bc);
     this.tracerConfig = this.session.tracerConfig;
 
     // Reseed is only meaningful where there is an initial pattern to restore.
@@ -722,7 +849,8 @@ export class Harness {
     // Keyed on the geometry revision as well as the scenario: surface
     // conditions attach to solid faces, so an edit can change what the legend
     // should say without the scenario changing at all.
-    const signature = `${this.scenarioId}:${this.session.editor.revision}`;
+    const signature =
+      `${this.scenarioId}:${this.session.editor.revision}:${this.session.boundaries.revision}`;
     if (list.dataset.builtFor !== signature) {
       list.innerHTML = "";
       for (const entry of boundaryLegend(this.plan)) {
@@ -761,6 +889,9 @@ export class Harness {
     // Shown because a boundary specification that does not balance is a real
     // error, and this is where it becomes visible.
     set("#bcnet", exponential(flux.net, 2), isBad(flux.net) || Math.abs(flux.net) > 1e-6);
+
+    this.root.querySelector("#bcundo").disabled = !this.session.canUndoBoundary;
+    this.root.querySelector("#bcredo").disabled = !this.session.canRedoBoundary;
 
     // Connected fluid regions. A second region is not an error - a sealed
     // chamber runs perfectly well - so this reports rather than warns. The
