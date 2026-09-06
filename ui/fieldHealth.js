@@ -13,6 +13,28 @@
 // next to a NOT FINITE field state is exactly the mixed message this whole
 // layer exists to prevent.
 
+// Whether a divergence reading describes a field the projection has not touched
+// yet, which is a different thing from a field the projection FAILED on and must
+// not be shown the same way.
+//
+// A scenario seeds whatever initial condition it defines, and one of them is not
+// divergence-free: the cylinder seeds a uniform stream in every fluid cell,
+// which is discontinuous across the obstacle and reads 1.20e+1 before the first
+// step. That number is correct. Printed identically to a running measurement,
+// beside a solver whose stated bound is 1e-7, it reads as a broken solver.
+//
+// Pure and here rather than inline in the harness for the same reason
+// assessField is: it decides what the panel may claim, and the failure mode that
+// matters is the false positive. Saying "not yet projected" about a field that
+// HAS been stepped would excuse a real divergence failure, so the test is
+// iteration 0 specifically - not "the number looks large", which a genuinely
+// diverging run also satisfies.
+export function isUnprojectedInitialCondition(iteration, maxDivergence, bound) {
+  if (iteration !== 0) return false;
+  if (!Number.isFinite(maxDivergence)) return false;
+  return maxDivergence > bound;
+}
+
 export function assessField(inspection) {
   if (inspection.finite) {
     return {

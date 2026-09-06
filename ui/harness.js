@@ -50,7 +50,7 @@ import {
 } from "../visualization/fieldSources.js";
 import { SCENARIOS, DEFAULT_SCENARIO } from "../scenarios/index.js";
 import { SimulationSession, StaleFieldError } from "./session.js";
-import { assessField } from "./fieldHealth.js";
+import { assessField, isUnprojectedInitialCondition } from "./fieldHealth.js";
 import { ValidationPanel } from "./validationPanel.js";
 import { exponential, fixed, integer, isBad } from "./format.js";
 
@@ -460,6 +460,7 @@ export class Harness {
 
     set("#divmax", exponential(divergence.max, 2), isBad(divergence.max));
     set("#divrms", exponential(divergence.rms, 2), isBad(divergence.rms));
+    this.updateDivergenceNote(divergence);
 
     // assessField decides what may be reported; see ui/fieldHealth.js for why
     // the peak speed is not simply inspection.maxSpeed.
@@ -544,18 +545,27 @@ export class Harness {
     const count = session.editor.size;
     set("#geomcount", count === 0 ? "none" : integer(count));
 
+    // The live line goes to the toolbar, not to this panel: it is read while
+    // dragging, so it belongs beside the canvas rather than four panels down
+    // the right column. Rendered in one place only - two elements showing the
+    // same live string is how the two come to disagree.
     const preview = this.previewSummary;
     if (this.editMessage !== null) {
-      set("#geompreview", this.editMessage, true);
+      set("#drawstatus", this.editMessage, true);
     } else if (preview === null) {
-      set("#geompreview", this.drawing.tool === "select" ? "pick a tool to draw" : "-");
+      set(
+        "#drawstatus",
+        this.drawing.tool === "select"
+          ? "pick a tool, then drag on the field to draw"
+          : `${DRAW_TOOLS[this.drawing.tool].label}: drag on the field`
+      );
     } else {
       const becomes = preview.operation.op === "add" ? "become solid" : "become fluid";
       // Zero is flagged rather than just printed. A drag narrower than a cell
       // is a perfectly valid shape that samples to nothing, and so is one drawn
       // entirely inside an existing wall - both look like the tool is broken
       // unless the readout says, before release, that this will change nothing.
-      set("#geompreview", `${integer(preview.changing)} cells ${becomes}`, preview.changing === 0);
+      set("#drawstatus", `${integer(preview.changing)} cells ${becomes}`, preview.changing === 0);
     }
 
     root.querySelector("#undo").disabled = !session.canUndo;
@@ -587,6 +597,36 @@ export class Harness {
       list.appendChild(row);
     });
     list.dataset.builtFor = signature;
+  }
+
+  // A scenario's seeded field need not be divergence-free, and one is not: the
+  // cylinder seeds a uniform stream in every fluid cell, which is discontinuous
+  // across the obstacle and reads 1.20e+1 before the first step. The number is
+  // correct, and shown identically to a running measurement it looks like a
+  // broken solver rather than an un-projected initial condition.
+  //
+  // So it is LABELLED rather than fixed. The alternative - projecting the
+  // initial condition in the scenario builder - would move the cylinder's
+  // initial state and with it the golden fields and possibly the benchmark,
+  // which is far too much to pay for a cosmetic problem.
+  //
+  // The note appears only when there is something to explain: at iteration 0,
+  // and only when the divergence is above the scenario's own bound.
+  updateDivergenceNote(divergence) {
+    const note = this.root.querySelector("#divnote");
+    const bound = this.scenario.params.divergenceTol;
+    const unprojected = isUnprojectedInitialCondition(this.iteration, divergence.max, bound);
+
+    this.root.querySelector("#divmax").classList.toggle("pending", unprojected);
+    note.hidden = !unprojected;
+    if (unprojected) {
+      note.textContent =
+        `Measured on the initial condition, before any step has been taken. A ` +
+        `scenario seeds whatever field it defines and that field need not be ` +
+        `divergence-free - this one seeds a uniform stream through cells the ` +
+        `obstacle interrupts. The first projection is what makes it so; press Run ` +
+        `and this drops below ${exponential(bound, 0)}.`;
+    }
   }
 
   updateTracerReadouts() {

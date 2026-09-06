@@ -111,6 +111,14 @@
   .geomrow .gdrop:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
   .geomrow .gindex { color: var(--ink-dim); width: 18px; flex: none; text-align: right; }
   #geomlist:empty::after { content: "no shapes drawn"; color: var(--ink-dim); font-size: 12px; }
+  .drawstatus {
+    color: var(--ink-dim); font-size: 12px; margin: -4px 0 10px;
+    min-height: 1.5em; font-variant-numeric: tabular-nums;
+  }
+  .drawstatus.bad { color: var(--bad); font-weight: 700; }
+  /* Amber, not red. A field that has not been projected yet is not a broken
+     field, and red is reserved for things that are actually wrong. */
+  dd.pending { color: #e0c46c; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -138,6 +146,12 @@
         <button id="clearshapes">Clear shapes</button>
         <label class="check"><input type="checkbox" id="showregions" checked> tint regions</label>
       </div>
+      <!-- The live drawing status sits here, under the tools and beside the
+           canvas, because it is read WHILE dragging. In the Geometry panel it
+           was correct and four panels down the right column, which on a laptop
+           put it below the fold - the one readout that makes the preview
+           trustworthy, off-screen at the moment it matters. -->
+      <div id="drawstatus" class="drawstatus">-</div>
       <canvas id="field"></canvas>
       <p id="note"></p>
     </div>
@@ -183,7 +197,6 @@
         <dl>
           <dt>tool</dt><dd id="geomtool">-</dd>
           <dt>shapes</dt><dd id="geomcount">-</dd>
-          <dt>preview</dt><dd id="geompreview">-</dd>
         </dl>
         <div id="geomlist"></div>
         <p class="vnote">Shapes are sampled onto the existing grid, so the
@@ -215,6 +228,7 @@
           <dt>poisson</dt><dd id="poisson">-</dd>
           <dt>last solve</dt><dd id="poissonits">-</dd>
         </dl>
+        <p id="divnote" class="vnote" hidden></p>
       </div>
 
       <div class="panel">

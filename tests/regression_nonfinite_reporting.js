@@ -29,7 +29,8 @@ import { StaggeredGrid } from "../geometry/grid.js";
 import { step, computeDivergence } from "../solver/ns2d.js";
 import { inspectField } from "../physics/fieldStats.js";
 import { sampleRamp, NON_FINITE_COLOUR } from "../visualization/colormap.js";
-import { assessField } from "../ui/fieldHealth.js";
+import { assessField, isUnprojectedInitialCondition } from "../ui/fieldHealth.js";
+import { buildScenario } from "../scenarios/index.js";
 import { exponential, fixed, integer, isBad } from "../ui/format.js";
 
 const CLOSED_BOX = {
@@ -226,4 +227,64 @@ test("regression - the pressure solve reports failure on a non-finite field", ()
   );
   // And it must give up rather than grinding to the iteration cap.
   assert.ok(result.poissonIterations < 100, `expected an early bail, took ${result.poissonIterations}`);
+});
+
+// ---------------------------------------------------------------------------
+// "Not yet projected" must never excuse a real divergence failure
+// ---------------------------------------------------------------------------
+//
+// The cylinder scenario seeds a uniform stream in every fluid cell, which is
+// discontinuous across the obstacle: max|div u| reads 1.20e+1 at iteration 0.
+// The panel labels that rather than showing it like a running measurement.
+//
+// The dangerous direction is the false positive. A label saying "this is just
+// the initial condition" attached to a field that has actually been stepped
+// would explain away exactly the failure the divergence readout exists to
+// catch, so the rule is keyed on iteration 0 and not on the number looking
+// large - a diverging run satisfies "looks large" too.
+
+test("regression - an un-projected initial condition is distinguished from a failure", () => {
+  const bound = 1e-7;
+
+  // The real case: the cylinder's seeded stream, before any step.
+  assert.equal(isUnprojectedInitialCondition(0, 12.0, bound), true);
+
+  // The same number one step later is a divergence failure, not an excuse.
+  assert.equal(isUnprojectedInitialCondition(1, 12.0, bound), false);
+  assert.equal(isUnprojectedInitialCondition(500, 12.0, bound), false);
+
+  // Scenarios whose seed IS divergence-free say nothing at all.
+  assert.equal(isUnprojectedInitialCondition(0, 0, bound), false);
+  assert.equal(isUnprojectedInitialCondition(0, bound, bound), false, "at the bound is not above it");
+
+  // A non-finite field is a hard stop and belongs to assessField, which halts
+  // the run. It must not be dressed up as an initial condition.
+  assert.equal(isUnprojectedInitialCondition(0, NaN, bound), false);
+  assert.equal(isUnprojectedInitialCondition(0, Infinity, bound), false);
+});
+
+test("regression - the cylinder is the case this rule was written for", () => {
+  // Measured rather than asserted from memory, and measured through the same
+  // builder the harness uses, so the rule cannot quietly stop applying to the
+  // scenario that motivated it.
+  const cylinder = buildScenario("cylinder");
+  const divergence = computeDivergence(cylinder.grid);
+  const bound = cylinder.params.divergenceTol;
+
+  assert.ok(
+    isUnprojectedInitialCondition(0, divergence.max, bound),
+    `the cylinder's seeded field reads ${divergence.max.toExponential(3)}, which should be labelled`
+  );
+
+  // And it is genuinely fixed by stepping, which is what the note promises.
+  for (let n = 0; n < 30; n++) {
+    step(cylinder.grid, cylinder.bc, { ...cylinder.params, dt: 2e-3 });
+  }
+  const after = computeDivergence(cylinder.grid).max;
+  assert.ok(after <= bound, `after 30 steps max|div u| is ${after.toExponential(3)}`);
+  assert.equal(isUnprojectedInitialCondition(30, after, bound), false);
+  console.log(
+    `[polish] cylinder max|div u|: ${divergence.max.toExponential(3)} seeded -> ` +
+    `${after.toExponential(3)} after 30 steps, against a bound of ${bound.toExponential(0)}`
+  );
 });
