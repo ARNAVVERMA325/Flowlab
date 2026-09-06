@@ -55,6 +55,7 @@ import { PassiveTracer } from "../tracer/passiveScalar.js";
 import { tracerConfigFor } from "../tracer/seeds.js";
 import { step } from "../solver/ns2d.js";
 import { computeStableTimestep } from "../solver/stability.js";
+import { sourcePlanFor } from "../sources/compile.js";
 import { buildScenario } from "../scenarios/index.js";
 
 export class StaleFieldError extends Error {
@@ -173,6 +174,10 @@ export class SimulationSession {
       nu: params.nu,
       safety: timestep.safety,
       previousTimestep: this.lastTimestep,
+      // A momentum source can leave the fluid moving at its target by the end
+      // of this step, and the field does not know that yet. Sized against it
+      // here so the step after this one is not the one that finds out.
+      incomingSpeed: sourcePlanFor(grid, sources).maxTargetCflSpeed,
     });
     this.lastTimestep = selection.dt;
     this.lastSelection = selection;

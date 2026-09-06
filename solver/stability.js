@@ -51,13 +51,25 @@ export function peakCellSpeed(grid) {
 
 // The hard limits for the current field. Exceeding either of these is not a
 // matter of degree - the scheme is unconditionally unstable beyond them.
-export function stabilityLimits(grid, nu) {
+//
+// `incomingSpeed` is a speed the field does not have YET but will have by the
+// end of the step, in the convective limit's own norm of |u| + |v|. A momentum
+// source is the case: it pulls a face toward its target, so the fluid can be
+// moving at the target by the time the step finishes, and a limit computed from
+// the field as it stands would not know. Zero for everything else, in which
+// case this is exactly the previous function.
+export function stabilityLimits(grid, nu, incomingSpeed = 0) {
   const { h } = grid;
   const { peak, finite, nonFiniteCells } = peakCellSpeed(grid);
+  const effective = Math.max(peak, incomingSpeed);
   return {
     viscous: nu > 0 ? (h * h) / (4 * nu) : Infinity,
-    convective: peak > 0 ? h / peak : Infinity,
+    convective: effective > 0 ? h / effective : Infinity,
     peakSpeed: peak,
+    // What the convective limit was actually computed from, which differs from
+    // peakSpeed exactly when a source is about to outrun the field.
+    limitingSpeed: effective,
+    incomingSpeed,
     finite,
     nonFiniteCells,
   };
@@ -80,14 +92,35 @@ export function stabilityLimits(grid, nu) {
 // maxTimestep caps the result independently of stability. A nearly stationary
 // field has no convective limit at all, and taking an enormous step would be
 // stable while destroying the temporal accuracy of the answer.
+//
+// `incomingSpeed` closes the gap this project has carried since M3: dt is
+// chosen from the field BEFORE the step, so a step that accelerates the flow
+// ends outside the limit the driver believes it is enforcing. Measured at an
+// effective convective CFL near 5 on the first step of the sharp bend.
+//
+// A momentum source would turn that from a once-per-run event into a
+// once-per-stroke one, because a brush accelerates the flow deliberately and
+// repeatedly. The relaxation formulation bounds how far: the source's
+// contribution leaves a face between its current velocity and the target, so
+// the speed after the step is at most max(field peak, target). That bound is
+// known before the step, which is what makes it usable here.
+//
+// This coupling belongs in the CHOICE, not in the rejection. The advection term
+// this step evaluates uses the velocity the field has now, so the current
+// field's CFL is the correct stability criterion for this step, and
+// assertTimestepIsStable would be wrong to refuse it. What the coupling buys is
+// the NEXT step: dt was sized for a field moving at the target, so the field
+// that exists afterwards is already within it. Nothing is rejected that would
+// have worked.
 export function computeStableTimestep(grid, {
   nu,
   safety = 0.4,
   maxTimestep = Infinity,
   previousTimestep = null,
   growthLimit = 1.1,
+  incomingSpeed = 0,
 }) {
-  const limits = stabilityLimits(grid, nu);
+  const limits = stabilityLimits(grid, nu, incomingSpeed);
 
   if (!limits.finite) {
     throw new SolverStabilityError(
@@ -115,6 +148,8 @@ export function computeStableTimestep(grid, {
     dt,
     limitedBy,
     peakSpeed: limits.peakSpeed,
+    limitingSpeed: limits.limitingSpeed,
+    incomingSpeed,
     // The numbers a reader needs to judge the choice, not just the choice.
     cflNumber: limits.convective === Infinity ? 0 : dt / limits.convective,
     diffusionNumber: limits.viscous === Infinity ? 0 : dt / limits.viscous,

@@ -140,6 +140,7 @@ export function compileSources(grid, sources) {
   let momentumCount = 0;
   let massCount = 0;
   let maxTargetSpeed = 0;
+  let maxTargetCflSpeed = 0;
   const attachments = [];
 
   list.forEach((source, index) => {
@@ -183,6 +184,7 @@ export function compileSources(grid, sources) {
       }
       momentumCount++;
       maxTargetSpeed = Math.max(maxTargetSpeed, kind.targetSpeed(source));
+      maxTargetCflSpeed = Math.max(maxTargetCflSpeed, kind.cflSpeed(source));
       attachments.push({
         index, kind: source.kind, label: source.label ?? null,
         uFaces, vFaces, cells: 0, targetSpeed: kind.targetSpeed(source),
@@ -235,6 +237,11 @@ export function compileSources(grid, sources) {
     momentumCount,
     massCount,
     maxTargetSpeed,
+    // In the convective limit's own norm, |u| + |v|. This is what a timestep
+    // has to be sized against: a source can leave the fluid moving this fast by
+    // the end of the step, and dt chosen from the field as it stands before the
+    // step would not know that.
+    maxTargetCflSpeed,
     attachments,
     nx: grid.nx,
     ny: grid.ny,

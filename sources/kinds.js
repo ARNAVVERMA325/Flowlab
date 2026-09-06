@@ -125,9 +125,19 @@ export const SOURCE_KINDS = {
     },
     describe: (s) =>
       `drives to (${s.u}, ${s.v}) over ${s.relaxationTime}s`,
-    // The fastest this source can leave the fluid moving, which is what the
-    // timestep has to be sized against.
+    // The fastest this source can leave the fluid moving. Two of them, because
+    // the two questions want different norms and using one for both would
+    // under-constrain the timestep.
+    //
+    //   targetSpeed  Euclidean - the physical speed, for reading and reporting.
+    //   cflSpeed     |u| + |v| - the norm the convective limit is actually
+    //                stated in, because a flow running diagonally through a
+    //                cell is constrained by both components at once.
+    //
+    // hypot(1,1) is 1.414 and |1|+|1| is 2, so sizing the timestep with the
+    // first would leave a diagonal brush 41% over its CFL limit.
     targetSpeed: (s) => Math.hypot(s.u, s.v),
+    cflSpeed: (s) => Math.abs(s.u) + Math.abs(s.v),
   },
 
   mass: {
@@ -149,6 +159,7 @@ export const SOURCE_KINDS = {
     // The velocity it induces is whatever the projection produces, which the
     // ordinary CFL check sees on the following step like any other flow.
     targetSpeed: () => 0,
+    cflSpeed: () => 0,
   },
 };
 

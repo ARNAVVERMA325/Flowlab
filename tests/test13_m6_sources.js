@@ -22,6 +22,9 @@ import { applyDocument, testRegion } from "../geometry/document.js";
 import { step, computeDivergence, computeContinuityError } from "../solver/ns2d.js";
 import { compileSources, sourcePlanFor, sourceLegend } from "../sources/compile.js";
 import { SOURCE_KINDS, SourceSpecError, describeSource, validateSource } from "../sources/kinds.js";
+import {
+  computeStableTimestep, peakCellSpeed, assertTimestepIsStable,
+} from "../solver/stability.js";
 import { FIXTURE_CASES, measureFixtureCase } from "./support/boundaryFixtures.js";
 import { buildScenario } from "../scenarios/index.js";
 import { SimulationSession } from "../ui/session.js";
@@ -735,5 +738,148 @@ test("M6 - the session hands the solver the sources the panel is drawing", () =>
   console.log(
     `[M6 step 3] session -> solver: raw max|div u| ${raw.toExponential(3)} = imposed q, ` +
     `continuity ${continuity.toExponential(2)}`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Step 4 - the timestep knows what the brush is about to do
+// ---------------------------------------------------------------------------
+
+test("M6 - a brush switched on in still water blows the CFL without the coupling", () => {
+  // The M3 limitation, reproduced deliberately. dt is chosen from the field
+  // before the step; still water has no convective limit at all, so the viscous
+  // limit sets dt - and then the source accelerates the fluid inside that same
+  // step. The violation is invisible to assertTimestepIsStable, which checks
+  // the field at ENTRY, and only exists in the field the step produces.
+  //
+  // This is the "before" measurement. It is asserted rather than described so
+  // that the fix below is measured against something real.
+  const n = 32;
+  const h = 1 / n;
+  const nu = 0.01;
+  const where = { kind: "rect", x0: 0.3, y0: 0.4, x1: 0.7, y1: 0.6 };
+
+  const worstCfl = (target, coupled) => {
+    const grid = new StaggeredGrid(n, n, h);
+    const sources = [{ kind: "momentum", where, u: target, v: target, relaxationTime: 0.02 }];
+    const incomingSpeed = coupled ? sourcePlanFor(grid, sources).maxTargetCflSpeed : 0;
+    let previousTimestep = null;
+    let worst = 0;
+    for (let k = 0; k < 40; k++) {
+      const sel = computeStableTimestep(grid, { nu, safety: 0.4, previousTimestep, incomingSpeed });
+      previousTimestep = sel.dt;
+      step(grid, BOX, {
+        nu, rho: 1, dt: sel.dt, divergenceTol: 1e-7, poissonMaxIterations: 20000, sources,
+      });
+      worst = Math.max(worst, (sel.dt * peakCellSpeed(grid).peak) / h);
+    }
+    return worst;
+  };
+
+  // Uncoupled, a fast brush runs the first step past the hard limit of 1.
+  const uncoupled = worstCfl(5, false);
+  assert.ok(uncoupled > 1, `expected a CFL violation without the coupling, got ${uncoupled}`);
+
+  // Coupled, it does not - and the worst case stops being the switch-on step.
+  const coupled = worstCfl(5, true);
+  assert.ok(coupled < 0.5, `the coupling should hold the CFL well under 1, got ${coupled}`);
+
+  console.log(
+    `[M6 step 4] brush target 5 from rest: worst CFL ${uncoupled.toFixed(3)} uncoupled -> ` +
+    `${coupled.toFixed(3)} coupled`
+  );
+});
+
+test("M6 - the coupling uses the CFL's own norm, not the physical speed", () => {
+  // The convective limit is stated on |u| + |v|, because a flow running
+  // diagonally through a cell is constrained by both components at once.
+  // hypot(1,1) is 1.414 and |1|+|1| is 2, so sizing a diagonal brush by its
+  // physical speed would leave it 41% over the limit.
+  const diagonal = { u: 1, v: 1 };
+  assert.equal(SOURCE_KINDS.momentum.targetSpeed(diagonal), Math.SQRT2);
+  assert.equal(SOURCE_KINDS.momentum.cflSpeed(diagonal), 2);
+
+  const { grid } = stillBox({ n: 20 });
+  const plan = sourcePlanFor(grid, [
+    { kind: "momentum", where: middleBand, u: 1, v: 1, relaxationTime: 0.1 },
+  ]);
+  assert.equal(plan.maxTargetCflSpeed, 2, "the plan carries the CFL norm");
+  assert.equal(plan.maxTargetSpeed, Math.SQRT2, "and the physical speed, separately");
+
+  // The two produce different timesteps, which is the whole point.
+  const byCfl = computeStableTimestep(grid, { nu: 0.01, incomingSpeed: 2 }).dt;
+  const bySpeed = computeStableTimestep(grid, { nu: 0.01, incomingSpeed: Math.SQRT2 }).dt;
+  assert.ok(bySpeed > byCfl, "the physical speed gives a larger, under-constrained timestep");
+  console.log(
+    `[M6 step 4] diagonal brush: dt ${byCfl.toExponential(3)} by |u|+|v| against ` +
+    `${bySpeed.toExponential(3)} by hypot - ${((bySpeed / byCfl - 1) * 100).toFixed(0)}% too large`
+  );
+});
+
+test("M6 - the coupling changes the choice and rejects nothing", () => {
+  // It belongs in computeStableTimestep, not in assertTimestepIsStable. The
+  // advection this step evaluates uses the velocity the field has NOW, so the
+  // current field's CFL is the right criterion for this step; refusing it would
+  // refuse a step that works. What the coupling buys is that the NEXT step's
+  // field is already inside the dt that was chosen.
+  const { grid } = stillBox({ n: 20 });
+  const sources = [{ kind: "momentum", where: middleBand, u: 5, v: 0, relaxationTime: 0.02 }];
+  const plan = sourcePlanFor(grid, sources);
+
+  const plain = computeStableTimestep(grid, { nu: 0.01, safety: 0.4 });
+  const coupled = computeStableTimestep(grid, {
+    nu: 0.01, safety: 0.4, incomingSpeed: plan.maxTargetCflSpeed,
+  });
+  assert.ok(coupled.dt < plain.dt, "a fast source should shrink the chosen timestep");
+  assert.equal(plain.limitingSpeed, 0, "still water on its own has no convective limit");
+  assert.equal(coupled.limitingSpeed, 5);
+  assert.equal(coupled.incomingSpeed, 5);
+  assert.equal(coupled.limitedBy, "convective");
+
+  // And the larger, uncoupled dt is still accepted by the entry check, because
+  // for the field as it stands it is genuinely stable.
+  assert.doesNotThrow(() => assertTimestepIsStable(grid, 0.01, plain.dt));
+});
+
+test("M6 - with no source the timestep choice is exactly what it always was", () => {
+  const { grid } = stillBox({ n: 20 });
+  grid.u[grid.idx(5, 5)] = 0.4;
+  const options = { nu: 0.01, safety: 0.4, previousTimestep: 1e-3 };
+  const before = computeStableTimestep(grid, options);
+  const withZero = computeStableTimestep(grid, { ...options, incomingSpeed: 0 });
+  const withEmptyPlan = computeStableTimestep(grid, {
+    ...options, incomingSpeed: sourcePlanFor(grid, []).maxTargetCflSpeed,
+  });
+  assert.equal(withZero.dt, before.dt);
+  assert.equal(withEmptyPlan.dt, before.dt);
+  assert.equal(before.limitingSpeed, before.peakSpeed);
+});
+
+test("M6 - the session sizes its timestep against the sources it is running", () => {
+  // Asserted through the session rather than the solver, because this is the
+  // path the app actually takes - and the last integration gap in this
+  // milestone was exactly a value the session failed to thread through.
+  const scenario = buildScenario("cavity");
+  const { grid } = scenario;
+  scenario.sources = [{
+    kind: "momentum",
+    where: { kind: "rect", x0: 0.3, y0: 0.3, x1: 0.7, y1: 0.7 },
+    u: 8, v: 0, relaxationTime: 0.02,
+  }];
+  const session = new SimulationSession("cavity");
+  session.scenario = scenario;
+  session.maskVersionAtReset = grid.maskVersion;
+
+  session.advance();
+  const withSource = session.lastSelection;
+  assert.equal(withSource.incomingSpeed, 8, "the session must pass the source's CFL speed");
+  assert.ok(withSource.dt <= (0.4 * grid.h) / 8 + 1e-15, `dt ${withSource.dt} is not sized against the target`);
+
+  const plain = new SimulationSession("cavity");
+  plain.advance();
+  assert.equal(plain.lastSelection.incomingSpeed, 0);
+  console.log(
+    `[M6 step 4] session with a target-8 brush chose dt ${withSource.dt.toExponential(3)} ` +
+    `against ${plain.lastSelection.dt.toExponential(3)} without it`
   );
 });
