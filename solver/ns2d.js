@@ -42,6 +42,8 @@
 
 import { compileBoundaryConditions, planMatchesGrid } from "../boundaries/compile.js";
 import { fluidRegions } from "../geometry/regions.js";
+import { sourcePlanFor } from "../sources/compile.js";
+import { SourceSpecError } from "../sources/kinds.js";
 import { assertTimestepIsStable, peakCellSpeed, SolverStabilityError } from "./stability.js";
 
 // A geometry the solver cannot satisfy, as opposed to one it merely finds
@@ -584,10 +586,35 @@ export function applyBoundaryConditions(grid, bc) {
   applyPressureBoundaryConditions(grid, bc);
 }
 
-function computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G) {
+// `sources` is a compiled source plan's `momentum` (or null). The relaxation it
+// applies is added AFTER the `dt * (...)` bracket rather than folded into it as
+// an acceleration, and that is deliberate.
+//
+// The source is defined by the velocity change it makes in one step,
+// du = alpha * (target - u). Expressing that as a force means writing
+// f = alpha * (target - u) / dt and then multiplying by dt again, and in
+// floating point dt * (x / dt) is not x. Adding the increment directly is the
+// same operator split evaluated without the round trip: the change is EXACTLY
+// alpha * (target - u), so the bound the formulation exists for holds exactly
+// rather than nearly.
+//
+// What that bound says, precisely: the SOURCE's contribution to this face
+// cannot carry it past its target, so the source alone cannot leave the field
+// faster than max(|u|, |target|). Advection and diffusion still contribute
+// their own change, and the projection changes u again afterwards - those are
+// what the ordinary CFL and diffusion limits are for. The point is that the
+// source no longer adds an unbounded amount on top of them.
+//
+// When `sources` is null nothing here is evaluated and the arithmetic is the
+// expression it has always been, which is what keeps the golden fields
+// byte-identical.
+function computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G, sources = null) {
   const { nx, ny, h, u, v, solid } = grid;
   const idx = idxFor(grid);
   const h2 = h * h;
+  const relaxU = sources === null ? null : sources.u;
+  const relaxV = sources === null ? null : sources.v;
+  const relaxTable = sources === null ? null : sources.table;
 
   // F at u-locations. Interior: i = 1..nx-1, j = 1..ny. Faces touching a
   // solid cell are not degrees of freedom and are set by the BC pass.
@@ -610,6 +637,18 @@ function computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G) {
       const duvdy = (un * vn - us * vs) / h;
 
       F[k] = uij + dt * (nu * (d2udx2 + d2udy2) - du2dx - duvdy + fx);
+
+      if (relaxU !== null) {
+        const row = relaxU[k];
+        if (row >= 0) {
+          const source = relaxTable[row];
+          // alpha clamps at 1, so a relaxation time shorter than the timestep
+          // means "reach the target this step" rather than overshooting past
+          // it. The bound holds for any tau and any dt.
+          const alpha = Math.min(1, dt / source.relaxationTime);
+          F[k] += alpha * (source.u - uij);
+        }
+      }
     }
   }
 
@@ -633,6 +672,15 @@ function computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G) {
       const duvdx = (ue * ve - uw * vw) / h;
 
       G[k] = vij + dt * (nu * (d2vdx2 + d2vdy2) - duvdx - dv2dy + fy);
+
+      if (relaxV !== null) {
+        const row = relaxV[k];
+        if (row >= 0) {
+          const source = relaxTable[row];
+          const alpha = Math.min(1, dt / source.relaxationTime);
+          G[k] += alpha * (source.v - vij);
+        }
+      }
     }
   }
 }
@@ -1108,11 +1156,37 @@ export function step(grid, bc, params) {
     dt,
     fx = 0,
     fy = 0,
+    sources = null,
     divergenceTol = 1e-8,
     poissonMaxIterations = 5000,
   } = params;
 
   const plan = boundaryPlanFor(grid, bc);
+  const sourcePlan = sourcePlanFor(grid, sources);
+
+  // Mass sources compile, and are refused here.
+  //
+  // They make div u = q by design, which brings a solvability condition with
+  // real teeth: on a pure-Neumann region the integral of q must equal the net
+  // flux through that region's boundary, or no pressure field exists. The
+  // intention is to let M5's per-region detector catch that rather than build a
+  // second mechanism - but that is a prediction, and the last two predictions
+  // of this kind were both wrong in ways worth knowing about. It gets
+  // demonstrated before it gets designed around.
+  //
+  // Refused rather than ignored. A mass source that compiled cleanly and then
+  // silently did nothing is precisely the failure this codebase keeps finding,
+  // and the user's only evidence would be a flow that did not change.
+  if (sourcePlan.mass !== null) {
+    throw new SourceSpecError(
+      `${sourcePlan.massCount} mass source(s) are in this specification, and the ` +
+      `solver does not apply them yet. They are compiled and validated, but the ` +
+      `pressure equation's solvability condition for an interior mass source has ` +
+      `not been demonstrated, so applying them would be guessing. Momentum ` +
+      `sources are available and unaffected.`,
+      { reason: "mass-sources-not-implemented", count: sourcePlan.massCount }
+    );
+  }
   const { F, G, rhs, cells } = scratchFor(grid, plan);
 
   // Reject a timestep this field cannot survive, before doing any work. If the
@@ -1129,7 +1203,7 @@ export function step(grid, bc, params) {
   // obstacle) still carries a meaningful value for the BC pass to work from.
   F.set(grid.u);
   G.set(grid.v);
-  computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G);
+  computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G, sourcePlan.momentum);
   applyVelocityBoundaryConditions(grid, bc, F, G);
 
 
