@@ -22,6 +22,28 @@ Read this before starting any implementation session.
 6. **No unnecessary dependencies.** Especially not in M0–M2.
 7. **Document the numerical method chosen and why** — stability, accuracy, implementation
    cost, and room to expand. Do not pick a method because it is popular.
+8. **Any feature that can add or remove volume, flux, mass or momentum anywhere in the
+   domain must be checked against EVERY existing balance and conservation filter** — not
+   only the ones that look related.
+
+   This has now bitten six times, always in the same shape: a sum or a check filters on a
+   *proxy* for the property it cares about, the proxy and the property coincide when the
+   code is written, and a later feature separates them. The sum then keeps returning a
+   healthy-looking number for a field that is wrong.
+
+   | # | the filter used | the property actually meant | what broke it |
+   |---|---|---|---|
+   | 1 | `type === "outflow"` | does this face carry flux | opposed outlets — reported 8.115e-8 against an actual 2.950e-1 |
+   | 2 | domain sides only | does this boundary take part in the balance | an all-zero-gradient domain — reported 9.889e-8 against 1.206e-2 |
+   | 3 | domain sides only | which faces carry inflow | M5 surface inlets — delivered 0.15 exactly while producing div 5.3e-2 |
+   | 4 | domain edges only | is anything entering this region | a region fed by a surface pressure reported "sealed" |
+   | 5 | `!solid[...]` | can this face carry flow | the tracer skipped drawn outlets — dye +70.4% over 400 steps |
+   | 6 | boundary faces only | does this region gain or lose volume | M6 interior mass sources — a legitimate source with an outlet was rejected |
+
+   The general defence, when one exists, is a check that measures the CONSEQUENCE rather
+   than auditing the causes — `assertRegionsAreSolvable` is that for the pressure equation,
+   and it caught instances 1, 2 and 3 at once. Where no such check exists, the question has
+   to be asked deliberately during the milestone rather than discovered afterwards.
 
 ### Directory separation
 
