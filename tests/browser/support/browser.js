@@ -42,6 +42,17 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { createConnection } from "node:net";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+// Resolved from this module, not from the caller's working directory. `npm run
+// browser` always runs at the package root so a relative path happens to work
+// there, but anything else - a check run by hand, a script importing this
+// helper - would spawn a server that exits immediately because the path does
+// not resolve. That failure then looked like "no free port", which is a
+// diagnosis of the wrong thing entirely.
+const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const SERVE_SCRIPT = join(PROJECT_ROOT, "scripts", "serve.js");
 
 export const SKIP_MESSAGE =
   "Playwright is not installed. These checks are optional and not a project " +
@@ -108,13 +119,22 @@ function portIsOpen(port) {
 // Serves the app on a port of its own, so a check never collides with a server
 // someone left running and never depends on one being up.
 export async function startServer() {
+  if (!existsSync(SERVE_SCRIPT)) {
+    throw new Error(`cannot find the dev server at ${SERVE_SCRIPT}`);
+  }
+  // Kept so a failure can say WHY rather than blaming the port scan.
+  const reasons = [];
   for (let port = 8391; port < 8420; port++) {
-    if (await portIsOpen(port)) continue;
-    const child = spawn(process.execPath, ["scripts/serve.js"], {
+    if (await portIsOpen(port)) { reasons.push(`${port}: already in use`); continue; }
+    const child = spawn(process.execPath, [SERVE_SCRIPT], {
+      cwd: PROJECT_ROOT,
       env: { ...process.env, PORT: String(port) },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const failed = once(child, "exit").then(() => "exited");
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const failed = once(child, "exit").then(([code]) =>
+      `exited with code ${code}${stderr ? `: ${stderr.trim().split("\n")[0]}` : ""}`);
     const ready = (async () => {
       for (let attempt = 0; attempt < 100; attempt++) {
         if (await portIsOpen(port)) return "ready";
@@ -126,9 +146,13 @@ export async function startServer() {
     if (outcome === "ready") {
       return { url: `http://127.0.0.1:${port}/index.html`, stop: () => child.kill() };
     }
+    reasons.push(`${port}: ${outcome}`);
     child.kill();
   }
-  throw new Error("could not find a free port to serve the app on");
+  throw new Error(
+    `could not start the dev server on any port in 8391-8419:\n  ` +
+    `${reasons.slice(0, 5).join("\n  ")}`
+  );
 }
 
 // A page with the error trap armed.
