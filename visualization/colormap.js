@@ -33,7 +33,28 @@ const STOPS = [
 export const NON_FINITE_COLOUR = [0xff, 0x00, 0xaa];
 
 // Solid obstacle / wall material.
-export const SOLID_COLOUR = [0x33, 0x33, 0x31];
+// Solid cells. A mid WARM grey, and both halves of that were measured rather
+// than chosen.
+//
+// It was [0x33, 0x33, 0x31] - a dark neutral - and that put it 10.0 RGB units
+// from the diverging ramp's centre and 16.9 from the dye ramp's low end, out of
+// a possible 441. In the pressure view a wall and fluid sitting at the mean
+// were the same colour, so you could not tell where the geometry was; in the
+// dye view a wall and clean fluid were nearly the same. Found by looking at a
+// screenshot, which is the only way a thing like this gets found.
+//
+// Sweeping candidates against every point of all three ramps, the worst-case
+// distance peaks around a mid grey with a slight warm cast. Warm because every
+// ramp here is cool at its dark end, so hue separates the wall even where
+// lightness is close:
+//
+//   [ 51, 51, 49]  velocity  69.4   pressure  10.0   dye  16.9   worst 10.0
+//   [120,112,102]  velocity 111.7   pressure  73.3   dye  57.8   worst 57.8
+//
+// A 5.8x improvement in the worst case, and the limiting ramp is now dye rather
+// than pressure. Mid lightness rather than light: a wall should read as
+// structure, not as data at the top of a scale.
+export const SOLID_COLOUR = [0x78, 0x70, 0x66];
 
 export const SURFACE_COLOUR = SURFACE;
 

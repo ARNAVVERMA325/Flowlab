@@ -13,7 +13,19 @@
 // broken field normalises to, whether dye is auto-scaled - live here, where
 // node can test them.
 
-import { inspectScalar, speedAtCell } from "../physics/fieldStats.js";
+import { deviationPercentile, inspectScalar, speedAtCell } from "../physics/fieldStats.js";
+
+// The pressure scale is fitted to this fraction of the cells rather than to the
+// extreme. Chosen from the distributions, not picked: at p99 roughly one cell
+// in a hundred clips and the rest of the field gets several times more of the
+// ramp, while p99.9 does essentially nothing and p95 throws away too much.
+//
+//   scenario      max|p-mean|   p99     cells clipped   field gets
+//   bend-sharp        6.244    1.373    18 (0.96%)         4.5x
+//   bend-smooth       2.899    0.695    17 (0.96%)         4.2x
+//   cylinder          0.687    0.360   121 (1.00%)         1.9x
+//   cavity            0.587    0.073    40 (0.98%)         8.1x
+const PRESSURE_CLIP = 0.99;
 import { sampleRamp, sampleDiverging, sampleDye } from "./colormap.js";
 
 // A scale is NaN-poisoned rather than defaulted when the field is not usable.
@@ -69,14 +81,46 @@ const PRESSURE = {
     const spread = summary.finite
       ? Math.max(Math.abs(summary.max - mean), Math.abs(summary.min - mean))
       : NaN;
+    // Fitted to the 99th percentile, not to the extreme.
+    //
+    // A geometric singularity - the mitre bend's sharp corner, the cavity's lid
+    // corners - reaches many times the rms of the field around it, and a scale
+    // drawn from the maximum spends almost the whole ramp on a handful of cells
+    // while everything the picture is meant to explain collapses to the centre.
+    // Measured on the mitre bend at t=8: the legend read +-9.66, set entirely by
+    // two adjacent cells at the corner, and the duct became indistinguishable
+    // from the wall.
+    //
+    // What is clipped is REPORTED rather than hidden - `clipped` carries the
+    // count and the true range, and the panel prints both. Fitting a scale
+    // quietly to a percentile would be exactly the kind of flattering picture
+    // this layer is not allowed to draw; saying "12 cells are beyond this, and
+    // the real range is X" is not.
+    const percentile = summary.finite
+      ? deviationPercentile(grid, raw, mean, PRESSURE_CLIP)
+      : null;
     // A perfectly uniform pressure field is meaningful (still water) and must
     // land on the centre stop rather than dividing by zero.
-    const amplitude = summary.finite ? (spread > 0 ? spread : 1) : NaN;
+    const fitted = percentile !== null && percentile.threshold > 0
+      ? percentile.threshold
+      : spread > 0 ? spread : 1;
+    const amplitude = summary.finite ? fitted : NaN;
     return {
       valueAt: (i, j) => raw(i, j) - mean,
       summary,
-      scale: { lo: -amplitude, hi: amplitude, centre: 0, diverging: true },
-      normalise: (value) => 0.5 + (0.5 * value) / amplitude,
+      scale: {
+        lo: -amplitude, hi: amplitude, centre: 0, diverging: true,
+        clipped: percentile === null || percentile.beyond === 0 ? null : {
+          cells: percentile.beyond,
+          of: percentile.cells,
+          trueLo: summary.min - mean,
+          trueHi: summary.max - mean,
+        },
+      },
+      // Clamped, so a clipped cell lands ON the end of the ramp rather than
+      // running off it into a colour the scale does not describe.
+      normalise: (value) =>
+        Math.min(1, Math.max(0, 0.5 + (0.5 * value) / amplitude)),
       ramp: sampleDiverging,
     };
   },

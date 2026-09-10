@@ -73,6 +73,38 @@ export function inspectField(grid) {
 // is here because a pressure field with all-Neumann boundaries is only defined
 // up to a constant, so the display has to subtract something before it can
 // show it - see visualization/fieldSources.js.
+// The magnitude below which a given fraction of the fluid cells fall, measured
+// as |value - centre|.
+//
+// This exists because fitting a colour scale to the extreme is fitting it to
+// whatever singularity the geometry happens to contain. On the mitre bend the
+// sharp corner reaches |p - mean| = 6.24 while the rms over the whole domain is
+// 0.70 - a ratio of 8.9 - so a scale drawn from the maximum squashes the
+// pressure field that actually explains the flow into the middle of the ramp
+// and leaves it invisible. The lid-driven cavity is worse: max/rms = 20.3.
+//
+// Returns null when the field is not usable, so a caller cannot get a plausible
+// number out of a broken field.
+export function deviationPercentile(grid, valueAt, centre, fraction) {
+  const { nx, ny, solid } = grid;
+  const deviations = [];
+  for (let j = 1; j <= ny; j++) {
+    for (let i = 1; i <= nx; i++) {
+      if (solid[grid.idx(i, j)]) continue;
+      const value = valueAt(i, j);
+      if (!Number.isFinite(value)) return null;
+      deviations.push(Math.abs(value - centre));
+    }
+  }
+  if (deviations.length === 0) return null;
+  deviations.sort((a, b) => a - b);
+  const index = Math.min(deviations.length - 1, Math.floor(fraction * deviations.length));
+  const threshold = deviations[index];
+  let beyond = 0;
+  for (const deviation of deviations) if (deviation > threshold) beyond++;
+  return { threshold, beyond, cells: deviations.length };
+}
+
 export function inspectScalar(grid, valueAt) {
   const { nx, ny, solid } = grid;
 

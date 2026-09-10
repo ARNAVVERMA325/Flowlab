@@ -1088,10 +1088,25 @@ export class Harness {
     // Same rule as the peak readout: a scale drawn from a partly broken field
     // is not a scale anyone should read a value off, and prepareView hands
     // back NaN bounds rather than the survivors' range when that happens.
-    const { lo, hi, centre } = view.scale;
+    const { lo, hi, centre, clipped } = view.scale;
     set("#legendmin", exponential(lo, 2), isBad(lo));
     set("#legendmid", centre === null ? "" : exponential(centre, 2));
     set("#legendmax", exponential(hi, 2), isBad(hi));
-    set("#viewnote", view.note);
+
+    // A clipped scale must SAY it is clipped, and say what it left out.
+    //
+    // Fitting the pressure scale to a percentile is what makes the field
+    // readable at all next to a geometric singularity, and it is also a picture
+    // that flatters: the ends of the ramp no longer mean what the legend says
+    // unless the legend admits the range runs further. So the count and the
+    // true extremes are printed with the note, not buried.
+    const clipNote = clipped === null || clipped === undefined
+      ? ""
+      : ` Scale fitted to 99% of cells: ${integer(clipped.cells)} of ` +
+        `${integer(clipped.of)} lie beyond it and are drawn at the ends of the ` +
+        `ramp. The true range is ${exponential(clipped.trueLo, 2)} to ` +
+        `${exponential(clipped.trueHi, 2)}, set by the sharpest feature in the ` +
+        `geometry rather than by the flow.`;
+    set("#viewnote", view.note + clipNote);
   }
 }

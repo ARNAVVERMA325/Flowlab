@@ -30,7 +30,9 @@ import { buildScenario, SCENARIOS } from "../scenarios/index.js";
 import { PassiveTracer, vanLeer, donorCell } from "../tracer/passiveScalar.js";
 import { tracerConfigFor } from "../tracer/seeds.js";
 import { prepareView, fieldSourceAvailable } from "../visualization/fieldSources.js";
-import { NON_FINITE_COLOUR } from "../visualization/colormap.js";
+import {
+  NON_FINITE_COLOUR, SOLID_COLOUR, sampleDiverging, sampleDye, sampleRamp,
+} from "../visualization/colormap.js";
 
 // Drives a scenario for n steps exactly as the harness does, optionally with a
 // tracer attached. Returns the grid so the caller can compare fields.
@@ -604,5 +606,90 @@ test("M3 - the seeded flag matches what each scenario's seed actually produces",
   console.log(
     `[M3 tracer] seeded scenarios: ${seeded.join(", ") || "none"}; ` +
     `the rest are injection-only and offer no reseed`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The pressure scale, and the wall being visible
+// ---------------------------------------------------------------------------
+//
+// Both of these were found by looking at a screenshot, which is worth recording
+// because no assertion in this file would have caught either. The pictures were
+// wrong in ways that only a person looking at them can see - and once seen,
+// both reduce to numbers that can be pinned.
+
+test("M3 - the pressure scale is fitted to the field, not to a singularity", () => {
+  // The mitre bend's sharp corner reaches many times the rms of the field
+  // around it. A scale drawn from the maximum spends nearly the whole ramp on
+  // two cells, and the duct - the thing the picture exists to show - collapses
+  // to the centre stop, which is also what a wall is drawn as.
+  const grid = new StaggeredGrid(40, 40, 1 / 40);
+  // A smooth field, plus one cell holding a value ten times anything else.
+  for (let j = 1; j <= grid.ny; j++) {
+    for (let i = 1; i <= grid.nx; i++) {
+      grid.p[grid.idx(i, j)] = Math.sin((i / grid.nx) * Math.PI) * 0.5;
+    }
+  }
+  grid.p[grid.idx(20, 20)] = 40;
+
+  const view = prepareView("pressure", { grid, tracer: null });
+  assert.notEqual(view.scale.clipped, null, "a singular cell must be reported as clipped");
+  assert.ok(
+    view.scale.hi < 5,
+    `the scale should follow the field, not the spike; it reads ${view.scale.hi}`
+  );
+  assert.ok(view.scale.clipped.trueHi > 39, "and the true range must still be reported");
+  assert.equal(view.scale.clipped.cells >= 1, true);
+
+  // The spike is clamped ONTO the end of the ramp, not past it into a colour
+  // the legend does not describe.
+  const t = view.normalise(view.valueAt(20, 20));
+  assert.equal(t, 1, `a clipped cell must land exactly at the end of the ramp, got ${t}`);
+  assert.ok(view.normalise(view.valueAt(1, 1)) >= 0);
+  assert.ok(view.normalise(-1e9) === 0, "and clamped at the low end too");
+  console.log(
+    `[M3 pressure scale] one cell at 40 against a field of +-0.5: scale fitted to ` +
+    `+-${view.scale.hi.toFixed(3)}, ${view.scale.clipped.cells} cell(s) clipped, ` +
+    `true range reported as ${view.scale.clipped.trueLo.toFixed(2)} to ${view.scale.clipped.trueHi.toFixed(2)}`
+  );
+});
+
+test("M3 - a uniform pressure field is not clipped and does not divide by zero", () => {
+  const grid = new StaggeredGrid(16, 16, 1 / 16);
+  const view = prepareView("pressure", { grid, tracer: null });
+  assert.equal(view.scale.clipped, null, "nothing to clip in a flat field");
+  assert.equal(view.normalise(view.valueAt(4, 4)), 0.5, "still water lands on the centre stop");
+});
+
+test("M3 - a solid cell is distinguishable from every ramp it sits beside", () => {
+  // It was not: at [0x33,0x33,0x31] a wall was 10.0 RGB units from the
+  // diverging ramp's centre and 16.9 from the dye ramp's low end, out of a
+  // possible 441. In the pressure view you could not see where the geometry
+  // was, and in the dye view a wall looked like clean fluid.
+  //
+  // The threshold is stated as a property rather than as the current value, so
+  // this catches a future ramp being added or extended into the wall's colour
+  // just as much as it catches the wall being moved.
+  const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  const ramps = { velocity: sampleRamp, pressure: sampleDiverging, dye: sampleDye };
+  const measured = {};
+  for (const [name, ramp] of Object.entries(ramps)) {
+    let closest = Infinity;
+    for (let k = 0; k <= 400; k++) {
+      closest = Math.min(closest, distance(SOLID_COLOUR, ramp(k / 400)));
+    }
+    measured[name] = closest;
+    assert.ok(
+      closest > 40,
+      `a solid cell is only ${closest.toFixed(1)} from the ${name} ramp - too close to tell apart`
+    );
+  }
+  // And it must not collide with the not-finite marker either, which is the one
+  // colour that has to stay unmistakable.
+  assert.ok(distance(SOLID_COLOUR, NON_FINITE_COLOUR) > 100);
+  console.log(
+    `[M3 solid colour] nearest approach of each ramp: ` +
+    Object.entries(measured).map(([n, d]) => `${n} ${d.toFixed(1)}`).join(", ") +
+    ` (was 69.4, 10.0, 16.9)`
   );
 });
