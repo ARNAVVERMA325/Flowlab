@@ -18,7 +18,17 @@ Read this before starting any implementation session.
 3. **Every milestone ends with a test and a physical sanity check**, not just code that runs.
 4. **Do not rewrite working systems** unless the milestone requires it.
 5. **Do not implement anything from `docs/references/*.png`** unless the current milestone
-   explicitly calls for it.
+   explicitly calls for it. **Read them; do not build from them.** They are the destination
+   drawn as one screen, and knowing where a milestone is heading is different from
+   shipping it early.
+
+   Spelled out because the ambiguity cost something. Through M0-M6 these were never
+   opened at all, on a reading of "do not implement" as "do not look" - and the pressure
+   view was auto-fitted to its extreme for four milestones while `visualisation-reference.png`
+   sat in the repository showing a bounded, legible pressure scale. A prohibition on
+   building is not a prohibition on looking, and reading a restriction for the
+   safest-sounding interpretation rather than for what it actually restricts is its own
+   way of getting it wrong.
 6. **No unnecessary dependencies.** Especially not in M0–M2.
 7. **Document the numerical method chosen and why** — stability, accuracy, implementation
    cost, and room to expand. Do not pick a method because it is popular.
@@ -44,6 +54,26 @@ Read this before starting any implementation session.
    than auditing the causes — `assertRegionsAreSolvable` is that for the pressure equation,
    and it caught instances 1, 2 and 3 at once. Where no such check exists, the question has
    to be asked deliberately during the milestone rather than discovered afterwards.
+9. **Test at the entry point the app actually uses, and finish a UI milestone in a
+   browser.** Two rules, from three integration bugs that reached the running app past a
+   green suite.
+
+   **Session level, not solver level.** If a feature is reachable through
+   `SimulationSession`, its test goes through the session. The node suite called `step()`
+   and passed its arguments explicitly, while the app assembles those arguments in the
+   session and renders the result in the harness — so the tests entered the system one
+   layer *below* where the app does, and the bugs lived in the assembly. Two of the three
+   were node-testable all along; nothing had asked the right question.
+
+   **A UI milestone is not complete until `npm run browser` covers the new interaction
+   and passes.** Not "was run once" — covers it, committed, in `tests/browser/`. What a
+   browser adds that nothing else can is the run loop, the rendering and real pointer
+   events; an exception thrown inside a `requestAnimationFrame` callback reaches nothing
+   an ordinary test looks at.
+
+   Corollary, learned the hard way inside those checks themselves: **no swallowing
+   catches.** `await page.click(...).catch(() => {})` on an element that never becomes
+   ready waits thirty seconds and then passes, having done nothing.
 
 ### Directory separation
 

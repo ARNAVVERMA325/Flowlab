@@ -1367,3 +1367,30 @@ test("M5 - switching scenario discards a document drawn against the old one", ()
   assert.equal(session.canUndo, false, "and no history from the previous scenario");
   assert.equal(session.iteration, 0);
 });
+
+test("M5 - replaceEdit swaps a shape in place and rebuilds the field", () => {
+  // The operation behind moving or resizing a drawn shape. Reached through the
+  // session, because that is where the rule about what happens to the field
+  // lives - working agreement item 9.
+  const session = new SimulationSession("cylinder");
+  const pristine = countMask(session.grid.solid);
+
+  session.applyEdit(TOOLS.rectangle(6, 2, 7, 4));
+  const withRect = countMask(session.grid.solid);
+  assert.ok(withRect > pristine);
+  for (let n = 0; n < 5; n++) session.advance();
+  assert.ok(session.iteration > 0);
+
+  // Replacing it with a bigger rectangle changes the mask and restarts the run,
+  // exactly as adding one does - the domain moved either way.
+  session.replaceEdit(1, TOOLS.rectangle(6, 2, 8, 4.5));
+  assert.equal(session.iteration, 0, "a replaced shape is still a geometry edit");
+  assert.equal(session.editor.size, 2, "and it replaces rather than appends");
+  assert.ok(countMask(session.grid.solid) > withRect);
+  assert.equal(session.fieldIsStale, false);
+
+  // Out of range is refused rather than silently appending.
+  assert.throws(() => session.replaceEdit(9, TOOLS.rectangle(1, 1, 2, 2)), RangeError);
+  assert.equal(session.editor.size, 2);
+  assert.doesNotThrow(() => session.advance());
+});

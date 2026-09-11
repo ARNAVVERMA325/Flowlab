@@ -35,6 +35,48 @@ export function isUnprojectedInitialCondition(iteration, maxDivergence, bound) {
   return maxDivergence > bound;
 }
 
+// What a thrown error means for the run: whether the harness should treat it as
+// a hard stop, and whether the numbers on screen are wreckage or fine.
+//
+// Pure, and here rather than inline in the animation loop, for the reason
+// working agreement item 9 exists. This decision used to live inside tick()'s
+// catch block, which is a requestAnimationFrame callback - so the one thing it
+// governs, an error escaping into a frame rather than into the panel, was
+// reachable only from a browser. It went wrong exactly once, when M5 made a
+// rejected geometry producible from the UI and SolverGeometryError was not in
+// the list; the page reported an uncaught exception and the app carried on
+// looking fine.
+//
+// Two properties it has to keep:
+//
+//   An error this does not recognise is RETHROWN, not swallowed. A catch-all
+//   that turns every exception into "simulation failed" would hide programming
+//   errors behind a plausible physical explanation.
+//
+//   A rejected geometry is not a broken field. The solver refuses before
+//   touching anything, so the field on screen is the untouched initial
+//   condition and the banner must not call it wreckage.
+export function classifyRunFailure(error, kinds) {
+  const { stability, divergence, geometry, staleField } = kinds;
+  if (error instanceof geometry) {
+    return {
+      halt: true,
+      kind: "geometry",
+      message: error.message,
+      // The domain was refused, not the field. Nothing was stepped.
+      fieldIsWreckage: false,
+    };
+  }
+  if (
+    error instanceof stability ||
+    error instanceof divergence ||
+    error instanceof staleField
+  ) {
+    return { halt: true, kind: "field", message: error.message, fieldIsWreckage: true };
+  }
+  return null;
+}
+
 export function assessField(inspection) {
   if (inspection.finite) {
     return {

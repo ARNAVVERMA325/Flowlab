@@ -26,10 +26,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { StaggeredGrid } from "../geometry/grid.js";
-import { step, computeDivergence } from "../solver/ns2d.js";
+import {
+  step, computeDivergence, SolverDivergenceError, SolverGeometryError,
+} from "../solver/ns2d.js";
 import { inspectField } from "../physics/fieldStats.js";
 import { sampleRamp, NON_FINITE_COLOUR } from "../visualization/colormap.js";
-import { assessField, isUnprojectedInitialCondition } from "../ui/fieldHealth.js";
+import {
+  assessField, classifyRunFailure, isUnprojectedInitialCondition,
+} from "../ui/fieldHealth.js";
+import { SolverStabilityError } from "../solver/stability.js";
+import { StaleFieldError } from "../ui/session.js";
 import { buildScenario } from "../scenarios/index.js";
 import { exponential, fixed, integer, isBad } from "../ui/format.js";
 
@@ -286,5 +292,75 @@ test("regression - the cylinder is the case this rule was written for", () => {
   console.log(
     `[polish] cylinder max|div u|: ${divergence.max.toExponential(3)} seeded -> ` +
     `${after.toExponential(3)} after 30 steps, against a bound of ${bound.toExponential(0)}`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// What a thrown error means for the run
+// ---------------------------------------------------------------------------
+//
+// This lived inside tick()'s catch block - a requestAnimationFrame callback -
+// so the one failure it governs, an error escaping into a frame instead of into
+// the panel, could only be reached from a browser. It went wrong exactly once:
+// M5 made a rejected geometry producible from the UI, SolverGeometryError was
+// not in the list, and the page reported an uncaught exception while the app
+// carried on looking fine.
+//
+// Extracted per working agreement item 9, and these are the questions node
+// could not previously ask.
+
+test("regression - every solver failure is recognised, and nothing else is", () => {
+  const kinds = {
+    stability: SolverStabilityError,
+    divergence: SolverDivergenceError,
+    geometry: SolverGeometryError,
+    staleField: StaleFieldError,
+  };
+
+  // Every error type the solver and session can throw must halt the run. This
+  // iterates the table rather than listing four cases, so a type added to the
+  // table and forgotten in the classifier fails here.
+  for (const [name, Kind] of Object.entries(kinds)) {
+    const verdict = classifyRunFailure(new Kind("something went wrong"), kinds);
+    assert.notEqual(verdict, null, `${name} must be recognised as a run failure`);
+    assert.equal(verdict.halt, true);
+    assert.equal(verdict.message, "something went wrong");
+  }
+
+  // And anything else is NOT swallowed. A catch-all would dress a programming
+  // mistake up as a physical failure and put it in the banner as though the
+  // fluid had done something.
+  for (const other of [new TypeError("x is not a function"), new RangeError("bad index"), new Error("plain")]) {
+    assert.equal(
+      classifyRunFailure(other, kinds), null,
+      `${other.constructor.name} must be rethrown, not reported as a simulation failure`
+    );
+  }
+});
+
+test("regression - a rejected geometry is not reported as a broken field", () => {
+  // The solver refuses an unsolvable domain BEFORE touching anything, so the
+  // field on screen is the untouched initial condition. Telling the viewer the
+  // numbers below are wreckage would be false, and it is the difference between
+  // "your domain cannot be solved" and "your simulation blew up".
+  const kinds = {
+    stability: SolverStabilityError,
+    divergence: SolverDivergenceError,
+    geometry: SolverGeometryError,
+    staleField: StaleFieldError,
+  };
+
+  const geometry = classifyRunFailure(new SolverGeometryError("no outlet"), kinds);
+  assert.equal(geometry.kind, "geometry");
+  assert.equal(geometry.fieldIsWreckage, false);
+
+  for (const Kind of [SolverStabilityError, SolverDivergenceError, StaleFieldError]) {
+    const verdict = classifyRunFailure(new Kind("broke"), kinds);
+    assert.equal(verdict.kind, "field", `${Kind.name} leaves a field nobody should read`);
+    assert.equal(verdict.fieldIsWreckage, true);
+  }
+  console.log(
+    `[run failure] 4 solver error types halt the run, 3 unrelated ones are rethrown, ` +
+    `and only a geometry rejection leaves the field readable`
   );
 });

@@ -275,3 +275,40 @@ test("M6 - boundary edits survive a geometry edit, which rebuilds everything els
   assert.equal(session.boundaries.revision, 0);
   assert.equal(session.bc.top.type, "wall");
 });
+
+test("M6 - boundary undo and redo are reported and reversible through the session", () => {
+  // Reached through the session because that is what the app drives: the
+  // harness disables its buttons from these two getters, and calls these two
+  // methods. Working agreement item 9.
+  const session = new SimulationSession("cylinder");
+  // Read rather than assumed: the cylinder's top is already free-slip, so
+  // hardcoding "wall" as the thing undo restores tested nothing and failed.
+  const original = session.bc.top.type;
+  const edited = original === "wall" ? "freeSlip" : "wall";
+
+  assert.equal(session.canUndoBoundary, false, "nothing to undo on a fresh session");
+  assert.equal(session.canRedoBoundary, false);
+  assert.equal(session.undoBoundary(), false, "and undoing does nothing rather than throwing");
+  assert.equal(session.redoBoundary(), false);
+
+  session.setBoundary("top", { type: edited });
+  assert.equal(session.canUndoBoundary, true);
+  assert.equal(session.canRedoBoundary, false, "a fresh edit has no redo branch");
+
+  assert.equal(session.undoBoundary(), true);
+  assert.equal(session.bc.top.type, original);
+  assert.equal(session.canRedoBoundary, true);
+
+  assert.equal(session.redoBoundary(), true);
+  assert.equal(session.bc.top.type, edited);
+  assert.equal(session.canRedoBoundary, false);
+
+  // A new edit discards the redo branch, as the geometry editor does.
+  session.undoBoundary();
+  session.setBoundary("bottom", { type: "freeSlip" });
+  assert.equal(session.canRedoBoundary, false);
+
+  // And the run is never restarted by any of it.
+  assert.equal(session.iteration, 0);
+  assert.doesNotThrow(() => session.advance());
+});

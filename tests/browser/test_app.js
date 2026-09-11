@@ -373,6 +373,276 @@ describe("browser", { skip }, () => {
     });
   });
 
+  test("the dye controls paint dye and nothing else", async () => {
+    // #reseed and #cleardye only ever touch the tracer: the flow keeps whatever
+    // state it has. Driven here because a control nothing drives is a control
+    // nobody has checked - working agreement item 9.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      await page.click("#run");
+      await page.waitForTimeout(1500);
+      await page.click("#pause");
+
+      const seeded = await readState(page);
+      assert.ok(seeded.solver.dye > 0, "the cavity seeds dye at t = 0");
+
+      await page.click("#cleardye");
+      await page.waitForTimeout(200);
+      const cleared = await readState(page);
+      assert.equal(cleared.solver.dye, 0, "clearing must remove the dye");
+      assert.equal(
+        cleared.solver.iteration, seeded.solver.iteration,
+        "and must not reset or advance the run"
+      );
+
+      await page.click("#reseed");
+      await page.waitForTimeout(200);
+      const reseeded = await readState(page);
+      assert.ok(reseeded.solver.dye > 0, "reseeding must put it back");
+      assert.equal(reseeded.solver.iteration, seeded.solver.iteration);
+
+      // On a scenario with no initial pattern the control says why it is
+      // unavailable rather than clearing the dye and appearing to do nothing.
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(300);
+      assert.equal(
+        await page.evaluate(() => document.querySelector("#reseed").disabled), true,
+        "an injection-only scenario has nothing to reseed, and must say so"
+      );
+    });
+  });
+
+  test("redo and clear-shapes work on a drawn document", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(200);
+      const pristine = (await readState(page)).solver.solidCells;
+
+      await page.click('button.tool[data-tool="rectangle"]');
+      await drag(page, [6.0, 2.0], [7.0, 4.0]);
+      const drawn = (await readState(page)).solver.solidCells;
+      assert.ok(drawn > pristine);
+
+      await page.click("#undo");
+      await page.waitForTimeout(200);
+      assert.equal((await readState(page)).solver.solidCells, pristine);
+
+      await page.click("#redo");
+      await page.waitForTimeout(200);
+      assert.equal((await readState(page)).solver.solidCells, drawn, "redo must bring it back");
+
+      // Clear removes the scenario's own shape too - erasing the cylinder is a
+      // legitimate edit, and the solver is told about it like any other.
+      await page.click("#clearshapes");
+      await page.waitForTimeout(200);
+      const cleared = await readState(page);
+      assert.equal(cleared.solver.solidCells, 0, "clear removes every shape, the cylinder included");
+      assert.equal(cleared.solver.operations, 0);
+      assert.equal(
+        await page.evaluate(() => document.querySelector("#clearshapes").disabled), true,
+        "and disables itself once there is nothing left to clear"
+      );
+    });
+  });
+
+  test("the region tint toggle changes the picture and not the simulation", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(200);
+      // A wall across the channel, so there are two regions to tint.
+      await page.click('button.tool[data-tool="rectangle"]');
+      await drag(page, [7.0, 0.0], [7.3, 6.1]);
+      const split = await readState(page);
+      assert.match(split.panel.regions, /2 regions/);
+
+      // A checksum of the painted canvas, so "the toggle does something" is
+      // measured rather than assumed from the checkbox's state.
+      const checksum = () => page.evaluate(() => {
+        const c = document.querySelector("#field");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 401) sum = (sum * 31 + d[i]) >>> 0;
+        return sum;
+      });
+
+      const tinted = await checksum();
+      await page.uncheck("#showregions");
+      await page.waitForTimeout(200);
+      const plain = await readState(page);
+      assert.notEqual(await checksum(), tinted, "turning the tint off must change the picture");
+      assert.equal(plain.solver.iteration, split.solver.iteration, "and must not touch the run");
+      assert.equal(plain.solver.solidCells, split.solver.solidCells);
+
+      await page.check("#showregions");
+      await page.waitForTimeout(200);
+      assert.equal(await checksum(), tinted, "and turning it back on must restore it");
+    });
+  });
+
+  test("boundary undo and redo step through the history without stopping the run", async () => {
+    // The two history buttons are the only path back from a boundary edit, and
+    // they are wired to a different commit path than #bcapply - commitBoundary
+    // re-derives the plan and re-syncs the form, and either step could be
+    // missed while the apply path still looked right.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(200);
+
+      const disabled = (id) => page.evaluate((s) => document.querySelector(s).disabled, id);
+      assert.equal(await disabled("#bcundo"), true, "nothing has been edited yet");
+      assert.equal(await disabled("#bcredo"), true);
+
+      const before = await readState(page);
+      await page.click("#run");
+      await page.waitForTimeout(800);
+
+      await page.selectOption("#bcside", "top");
+      await page.selectOption("#bctype", "inflow");
+      await page.waitForTimeout(100);
+      await page.evaluate(() => {
+        document.querySelector('#bcfields input[data-field="v"]').value = "-0.3";
+      });
+      await page.click("#bcapply");
+      await page.waitForTimeout(600);
+
+      const edited = await readState(page);
+      assert.equal(edited.solver.bc.top.type, "inflow");
+      assert.equal(await disabled("#bcundo"), false, "an edit must be undoable");
+      assert.equal(await disabled("#bcredo"), true, "and there is nothing ahead of it");
+
+      await page.click("#bcundo");
+      await page.waitForTimeout(600);
+      const undone = await readState(page);
+      assert.deepEqual(
+        undone.solver.bc, before.solver.bc,
+        "undo must restore the whole specification, not just the edited side"
+      );
+      // commitBoundary re-syncs the form, so the type selector must follow the
+      // history rather than keep showing the undone edit.
+      assert.equal(
+        await page.evaluate(() => document.querySelector("#bctype").value),
+        before.solver.bc.top.type
+      );
+      assert.equal(await disabled("#bcredo"), false, "and the edit must be ahead of us now");
+
+      await page.click("#bcredo");
+      await page.waitForTimeout(600);
+      const redone = await readState(page);
+      assert.deepEqual(redone.solver.bc, edited.solver.bc, "redo must bring the edit back");
+
+      // None of that touched the run - a boundary edit is not a geometry edit.
+      assert.equal(redone.panel.status, "RUNNING");
+      assert.ok(
+        redone.solver.iteration > edited.solver.iteration,
+        "stepping through the history must not reset or stall the run"
+      );
+      assert.ok(Math.abs(Number(redone.panel.net)) < 1e-6, `net flux ${redone.panel.net}`);
+    });
+  });
+
+  test("the brush controls are the numbers a placed source carries", async () => {
+    // speed, radius, relax and dye are read by BOTH the brush and the place
+    // tool, which is the point of having one set of controls - so a placed
+    // source is where all four can be read back as numbers rather than
+    // inferred from how the fluid moved.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+
+      // fill() then an explicit change event: the harness binds on `change`,
+      // which a real user fires by leaving the field.
+      const setControl = async (id, value) => {
+        await page.fill(id, String(value));
+        await page.dispatchEvent(id, "change");
+      };
+      await setControl("#brushspeed", 2.5);
+      await setControl("#brushradius", 5);
+      await setControl("#brushrelax", 0.2);
+      await setControl("#brushdye", 0.4);
+
+      assert.deepEqual(
+        await page.evaluate(() => window.__flowlab.brush.settings),
+        { speed: 2.5, radius: 5, relaxationTime: 0.2 },
+        "the three brush settings must reach the controller"
+      );
+
+      await page.click('button.tool[data-tool="placeSource"]');
+      const [x, y] = await clientFor(page, 0.5, 0.5);
+      await page.mouse.click(x, y);
+      await page.waitForTimeout(200);
+
+      const placed = await page.evaluate(() => {
+        const h = window.__flowlab;
+        return { source: h.session.placedSources[0] ?? null, h: h.scenario.grid.h };
+      });
+      assert.ok(placed.source, "the click must have placed a source");
+      assert.equal(placed.source.u, 2.5, "speed must reach the placed source");
+      assert.equal(placed.source.v, 0);
+      assert.equal(placed.source.relaxationTime, 0.2);
+      assert.ok(
+        Math.abs(placed.source.where.radius - 5 * placed.h) < 1e-12,
+        `radius is in cells: expected ${5 * placed.h}, got ${placed.source.where.radius}`
+      );
+      // #brushdye is the one control the brush itself ignores: a stroke leaves
+      // nothing behind, so dye only means anything on something persistent.
+      assert.equal(placed.source.dye, 0.4);
+
+      // And a value the brush cannot use is refused by putting the old one
+      // back, rather than accepted and silently ignored.
+      await setControl("#brushradius", -1);
+      assert.equal(
+        await page.evaluate(() => document.querySelector("#brushradius").value), "5",
+        "a rejected setting must show the value actually in force"
+      );
+      assert.equal(
+        await page.evaluate(() => window.__flowlab.brush.settings.radius), 5
+      );
+    });
+  });
+
+  test("clear sources removes every placed source and then disables itself", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      assert.equal(
+        await page.evaluate(() => document.querySelector("#clearsources").disabled), true,
+        "there is nothing to clear before anything is placed"
+      );
+
+      await page.click('button.tool[data-tool="placeSource"]');
+      for (const [x, y] of [[0.35, 0.5], [0.65, 0.5]]) {
+        const [px, py] = await clientFor(page, x, y);
+        await page.mouse.click(px, py);
+        await page.waitForTimeout(150);
+      }
+      const placed = await readState(page);
+      assert.equal(placed.solver.placedCount, 2);
+      assert.equal(placed.panel.srccount, "2");
+      assert.equal(
+        await page.evaluate(() => document.querySelector("#clearsources").disabled), false
+      );
+
+      // The sources must be reaching the solver, or clearing them proves
+      // nothing about the solver's state.
+      await page.click("#run");
+      await page.waitForTimeout(1000);
+      assert.equal((await readState(page)).solver.sourceCount, 2);
+
+      await page.click("#clearsources");
+      await page.waitForTimeout(400);
+      const cleared = await readState(page);
+      assert.equal(cleared.solver.placedCount, 0);
+      assert.equal(cleared.solver.sourceCount, 0, "and the solver must stop being handed them");
+      assert.equal(cleared.panel.srccount, "none");
+      assert.equal(
+        await page.evaluate(() => document.querySelector("#clearsources").disabled), true
+      );
+      // Clearing a source is not a geometry edit: the run carries on.
+      assert.equal(cleared.panel.status, "RUNNING");
+    });
+  });
+
   test("switching the view does not touch the simulation", async () => {
     // M3's rule: changing what is displayed is a pure display change.
     await withApp(async ({ page }) => {

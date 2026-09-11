@@ -23,7 +23,7 @@ import {
   caseById,
   validationForScenario,
 } from "../validation/registry.js";
-import { SCENARIOS } from "../scenarios/index.js";
+import { SCENARIOS, buildScenario } from "../scenarios/index.js";
 import { hasMeasurement } from "../validation/measure.js";
 
 test("M2 - every case declares a valid classification and a rationale", () => {
@@ -174,4 +174,43 @@ test("M2 - every mapped scenario and case can actually be measured", () => {
       `registry maps scenario "${scenarioId}", which the harness does not offer`
     );
   }
+});
+
+test("M6 - a case benchmarked at another operating point declares it", () => {
+  // The cylinder scenario runs at Re = 100, where a real cylinder sheds a
+  // vortex street; the benchmark behind its "benchmarked" badge is a steady
+  // wake length at Re = 20. The panel showed the badge beside a picture of a
+  // different flow, covered only by the generic "recorded results for the
+  // validated configuration" note - far too quiet for a difference that large.
+  //
+  // Declared as a NUMBER so it cannot drift out of date: the panel compares it
+  // against the scenario's own Re, so changing either makes the warning appear
+  // or disappear on its own.
+  const cylinder = validationForScenario("cylinder");
+  assert.equal(cylinder.benchmarkedAt?.Re, 20);
+  assert.notEqual(
+    buildScenario("cylinder").Re, cylinder.benchmarkedAt.Re,
+    "this declaration only means anything while the two differ"
+  );
+
+  // A scenario whose benchmark covers its own operating point declares nothing,
+  // so the warning stays rare enough to be read. The cavity is benchmarked at
+  // Re = 100, 400 and 1000 and runs at 1000.
+  assert.equal(validationForScenario("cavity").benchmarkedAt, null);
+  assert.equal(buildScenario("cavity").Re, 1000);
+  assert.ok(
+    caseById("lid-driven-cavity").claims.some((c) => c.quantity.includes("Re=1000")),
+    "the cavity's own operating point is among its benchmarked ones"
+  );
+
+  // Every declaration must name a case that exists and a finite Reynolds number.
+  for (const [scenarioId, mapping] of Object.entries(SCENARIO_VALIDATION)) {
+    if (!mapping.benchmarkedAt) continue;
+    assert.ok(Number.isFinite(mapping.benchmarkedAt.Re), `${scenarioId}: Re must be a number`);
+    assert.ok(caseById(mapping.case), `${scenarioId}: names a case that does not exist`);
+  }
+  console.log(
+    `[M6 registry] cylinder runs at Re=${buildScenario("cylinder").Re}, benchmarked at ` +
+    `Re=${cylinder.benchmarkedAt.Re} - declared, so the panel says so`
+  );
 });

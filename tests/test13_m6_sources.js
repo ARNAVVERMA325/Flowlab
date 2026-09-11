@@ -1198,3 +1198,27 @@ test("M6 - a brush dragged over a wall holds no source rather than throwing", ()
   assert.notEqual(session.brushSource, null);
   assert.doesNotThrow(() => session.advance());
 });
+
+test("M6 - clearSources removes every placed source and leaves the brush alone", () => {
+  const session = new SimulationSession("cavity");
+  const where = { kind: "rect", x0: 0.3, y0: 0.3, x1: 0.7, y1: 0.7 };
+  assert.equal(session.clearSources(), false, "nothing to clear on a fresh session");
+
+  session.addSource({ kind: "momentum", where, u: 1, v: 0, relaxationTime: 0.05 });
+  session.addSource({ kind: "momentum", where, u: 0, v: 1, relaxationTime: 0.05 });
+  assert.equal(session.sources.length, 2);
+
+  // A live brush is not a placed source and must survive the clear - it belongs
+  // to a gesture in progress, not to the document.
+  session.setBrushSource({ kind: "momentum", where, u: 2, v: 0, relaxationTime: 0.05 });
+  assert.equal(session.sources.length, 3);
+
+  assert.equal(session.clearSources(), true);
+  assert.equal(session.placedSources.length, 0);
+  assert.notEqual(session.brushSource, null, "the brush is mid-stroke and is not a placed source");
+  assert.equal(session.sources.length, 1);
+
+  session.setBrushSource(null);
+  assert.equal(session.sources, null);
+  assert.doesNotThrow(() => session.advance());
+});

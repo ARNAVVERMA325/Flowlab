@@ -386,10 +386,24 @@ export const CASES = [
 //
 // A mapping asserts the case validates the scenario AS THE SCENARIO DEFINES
 // IT. Nothing here survives the geometry being edited; see the note above.
+// `benchmarkedAt` names the condition the case's external comparison was
+// actually measured at, when that differs from the condition the scenario runs
+// at. The panel compares it against the live scenario and says so.
+//
+// The cylinder is the case in point and it is not a small gap: the scenario
+// runs at Re = 100, where a real cylinder sheds a vortex street, while the
+// benchmark is a steady wake length at Re = 20. The panel said "benchmarked"
+// beside a picture of a different flow. The generic note - "recorded results
+// for the validated configuration, not a measurement of the run on screen" -
+// covers it in principle and is far too quiet for a difference that large.
+//
+// Stated as a NUMBER compared against the scenario's own Re rather than as a
+// sentence, so it cannot drift: change a scenario's Reynolds number and the
+// panel starts or stops warning on its own.
 export const SCENARIO_VALIDATION = {
   "bend-sharp": { case: "channel-bend" },
   "bend-smooth": { case: "channel-bend" },
-  cylinder: { case: "cylinder-wake" },
+  cylinder: { case: "cylinder-wake", benchmarkedAt: { Re: 20 } },
   cavity: { case: "lid-driven-cavity" },
   "pressure-channel": { case: "pressure-driven-channel" },
   // The segmented jet demonstrates the M4 boundary model; no case validates the
@@ -425,6 +439,7 @@ export function validationForScenario(scenarioId) {
     caseId: entry.id,
     label: entry.label,
     reference,
+    benchmarkedAt: mapping.benchmarkedAt ?? null,
     caveat: entry.caveat ?? null,
     measuredBy: entry.measuredBy,
   };

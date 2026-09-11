@@ -56,7 +56,9 @@ import {
 } from "../visualization/fieldSources.js";
 import { SCENARIOS, DEFAULT_SCENARIO } from "../scenarios/index.js";
 import { SimulationSession, StaleFieldError } from "./session.js";
-import { assessField, isUnprojectedInitialCondition } from "./fieldHealth.js";
+import {
+  assessField, classifyRunFailure, isUnprojectedInitialCondition,
+} from "./fieldHealth.js";
 import { ValidationPanel } from "./validationPanel.js";
 import { exponential, fixed, integer, isBad } from "./format.js";
 
@@ -73,6 +75,16 @@ const FRAME_BUDGET_MS = 24;
 // most responsible for, and covering it to label it would be a poor trade.
 const BAND = 7;
 const MARGIN = BAND + 2;
+
+// The error types a run can fail with, handed to classifyRunFailure so that the
+// classification itself stays free of solver imports and can be tested without
+// one. Adding a new solver error type means adding it here and nowhere else.
+const RUN_FAILURE_KINDS = {
+  stability: SolverStabilityError,
+  divergence: SolverDivergenceError,
+  geometry: SolverGeometryError,
+  staleField: StaleFieldError,
+};
 
 export class Harness {
   constructor(root) {
@@ -447,6 +459,10 @@ export class Harness {
   renderValidation() {
     this.validation.render(this.scenarioId, {
       geometryEdited: !this.session.geometryMatchesScenario,
+      // The condition the scenario actually runs at, so a case benchmarked at a
+      // different Reynolds number says so rather than letting "benchmarked"
+      // stand beside a flow in another regime.
+      scenarioRe: this.scenario.Re ?? null,
     });
   }
 
@@ -561,29 +577,20 @@ export class Harness {
         if (performance.now() - started > FRAME_BUDGET_MS) break;
       }
     } catch (error) {
-      // Three solver failure modes are hard stops here: the scheme coming apart
-      // (stability), the projection failing to deliver the incompressibility it
-      // promised (divergence), and the domain the geometry describes not being
-      // solvable at all.
-      //
-      // The last one only became reachable when drawing arrived. Before M5 the
-      // geometries were fixed and valid, so a rejected domain could not happen
-      // from the UI; now the most natural experiment there is - draw a wall
-      // across the channel - produces exactly that, and it must land in the
-      // panel rather than as an uncaught exception inside a frame callback.
-      const isSolverFailure =
-        error instanceof SolverStabilityError ||
-        error instanceof SolverDivergenceError ||
-        error instanceof SolverGeometryError ||
-        error instanceof StaleFieldError;
-      if (!isSolverFailure) throw error;
+      // The decision about what an error MEANS is a pure function in
+      // ui/fieldHealth.js, not a list of instanceof checks inlined in a frame
+      // callback. It went wrong there once - M5 made a rejected geometry
+      // producible from the UI, SolverGeometryError was not in the list, and the
+      // exception escaped into the animation loop - and a decision reachable
+      // only from a browser is a decision node tests cannot ask about.
+      const failure = classifyRunFailure(error, RUN_FAILURE_KINDS);
+      // An unrecognised error is rethrown. A catch-all here would dress a
+      // programming mistake up as a physical failure.
+      if (failure === null) throw error;
       this.state = "failed";
       this.stopLoop();
-      this.failure = error.message;
-      // A rejected geometry is not a broken field. The field is still the
-      // initial condition, unmodified - the solver refused before touching it -
-      // so the banner must not tell anyone the numbers below are wreckage.
-      this.failureKind = error instanceof SolverGeometryError ? "geometry" : "field";
+      this.failure = failure.message;
+      this.failureKind = failure.kind;
       this.draw();
       return;
     }

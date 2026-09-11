@@ -62,8 +62,10 @@ export class ValidationPanel {
   }
 
   // `geometryEdited` comes from the session's comparison of the sampled mask
-  // against the scenario's own, not from an edit counter.
-  render(scenarioId, { geometryEdited = false } = {}) {
+  // against the scenario's own, not from an edit counter. `scenarioRe` is the
+  // Reynolds number the scenario is actually running at, so a case benchmarked
+  // at a different one can say so.
+  render(scenarioId, { geometryEdited = false, scenarioRe = null } = {}) {
     const info = validationForScenario(scenarioId);
     const set = (id, text, cls) => {
       const node = this.root.querySelector(id);
@@ -162,6 +164,29 @@ export class ValidationPanel {
       table.appendChild(row);
     }
     detail.appendChild(table);
+
+    // The operating point, when the benchmark was measured at a different one.
+    //
+    // This is the same failure as showing a validated number beside an edited
+    // geometry, in a different variable: the record describes a configuration
+    // that is not the one on screen. The geometry version is handled by
+    // withdrawing the numbers, which would be too blunt here - the case IS
+    // about this scenario, just at another condition - so it is stated instead,
+    // above the caveat, where it is read before the numbers rather than after.
+    const benchmarkRe = info.benchmarkedAt?.Re;
+    if (
+      Number.isFinite(benchmarkRe) && Number.isFinite(scenarioRe)
+      && Math.abs(benchmarkRe - scenarioRe) > 1e-9
+    ) {
+      const mismatch = document.createElement("p");
+      mismatch.className = "vnote bad";
+      mismatch.textContent =
+        `Different operating point: this scenario runs at Re = ${fixed(scenarioRe, 0)}, ` +
+        `and the comparison above was measured at Re = ${fixed(benchmarkRe, 0)}. The ` +
+        `numbers describe the solver, not the flow currently on screen - the two ` +
+        `Reynolds numbers can be in genuinely different regimes.`;
+      detail.appendChild(mismatch);
+    }
 
     if (record.caveat) {
       const caveat = document.createElement("p");
