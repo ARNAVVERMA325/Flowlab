@@ -216,7 +216,12 @@ Not scheduled. Do not start any of these while a NOW milestone is open.
   shown without its datum, because with nothing prescribing one the field is only defined
   up to a constant.*
 - **M8 — Visualization modes**: velocity vectors, streamlines, pathlines, vorticity,
-  divergence, density — switchable without altering the simulation
+  divergence, density — switchable without altering the simulation.
+  *Built — see `docs/M8-visualization.md`. Five of the six exist; **density does not**,
+  and cannot: this is an incompressible solver with a single uniform ρ, so a density
+  view would be one flat colour in every scenario at every instant. Asserted in the
+  tests rather than left as an omission. "Divergence" is shown as the **continuity
+  error** ∇·u − q, per M6.*
 - **M9 — Flow analysis**: Reynolds number, velocity gradients, shear, separation and
   recirculation indicators, pressure drop
 - **M10 — Experiment mode**: guided scenarios — pipe flow, flow around a cylinder, sharp vs.

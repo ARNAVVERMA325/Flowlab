@@ -244,7 +244,9 @@ export function readState(page) {
         net: text("#bcnet"), drawstatus: text("#drawstatus"),
         srccount: text("#srccount"), srcbrush: text("#srcbrush"),
         probehover: text("#probehover"), probeaxis: text("#probeaxis"),
-        pdatum: text("#pdatum"),
+        pdatum: text("#pdatum"), overlaynote: text("#overlaynote"),
+        viewnote: text("#viewnote"),
+        legend: [text("#legendmin"), text("#legendmid"), text("#legendmax")],
         banner: document.querySelector("#banner").hidden ? null : text("#banner"),
       },
       solver: {
@@ -264,6 +266,10 @@ export function readState(page) {
         // drawing. Read beside the iteration count deliberately: the two must
         // be equal, and that equality is the only way to see from outside that
         // sampling happens per solver step rather than per repaint.
+        mode: h.mode,
+        overlays: { ...h.overlays },
+        overlayCounts: h.overlayCounts,
+        parcels: h.session.pathlines.count,
         probeSamples: h.probeSelection === null
           ? null
           : h.session.probes.probeById(h.probeSelection).history.length,

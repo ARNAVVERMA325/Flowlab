@@ -54,6 +54,7 @@ import { BoundaryEditor } from "../boundaries/editor.js";
 import { compileBoundaryConditions } from "../boundaries/compile.js";
 import { sampleDocument } from "../geometry/document.js";
 import { PassiveTracer } from "../tracer/passiveScalar.js";
+import { PathlineSet } from "../tracer/pathlines.js";
 import { tracerConfigFor } from "../tracer/seeds.js";
 import { step } from "../solver/ns2d.js";
 import { computeStableTimestep } from "../solver/stability.js";
@@ -224,6 +225,11 @@ export class SimulationSession {
     // exposes holding whatever their slots contained.
     this.scenario = buildScenario(this.scenarioId, this.editor.document);
     this.tracer = new PassiveTracer(this.scenario.grid);
+    // Rebuilt rather than carried over: the particles are positions in a
+    // domain, and a geometry edit is exactly the case where some of those
+    // positions are now inside a wall. Seeded deterministically, so the same
+    // scenario reset twice gives the same picture.
+    this.pathlines = new PathlineSet(this.scenario.grid);
     this.tracerConfig = tracerConfigFor(this.scenarioId);
     this.tracer.seed(this.scenario.grid, this.tracerConfig.seed);
 
@@ -358,6 +364,13 @@ export class SimulationSession {
     // harness runs up to four steps per frame, so sampling on repaint would
     // keep one reading in four and alias anything varying near the step rate.
     this.probes.sample(grid, this.simulatedTime, { nu: params.nu });
+    // Advanced on every step whether or not anything is displaying them, and
+    // with the timestep the solver actually took. Turning the overlay on
+    // should show a trail, not start accumulating one - and at 85 us a step
+    // for 300 parcels, against 86 ms for a cylinder step, there is nothing to
+    // save by making it conditional. Like the tracer, it reads the field the
+    // solver just produced and writes nothing back.
+    this.pathlines.advance(grid, selection.dt);
     this.lastTracer = this.tracer.advect(grid, bc, selection.dt, {
       inject: this.tracerConfig.inject,
       // The dye a source carries is read here and nowhere below the display

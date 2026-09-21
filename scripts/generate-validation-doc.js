@@ -295,6 +295,20 @@ async function main() {
     "to 192 across these cases."
   );
   lines.push("");
+  lines.push(
+    "From `docs/M8-visualization.md`: the streamline and pathline overlays are " +
+    "drawn from a BILINEAR interpolation of the velocity field, which is exact " +
+    "on a linear field and is deliberately not what a probe does - a " +
+    "trajectory passes between cell centres, a reading does not. Curves stop " +
+    "at the first solid cell, which bounds but does not eliminate their " +
+    "exposure to the reflected in-body face values the solver keeps for its " +
+    "no-slip stencil. Even spacing between streamlines is an occupancy-grid " +
+    "approximation of Jobard & Lefebvre (1997), not that algorithm. None of " +
+    "these curves validates the flow - a streamline is exactly as accurate as " +
+    "the field it is traced in. There is no density view because there is no " +
+    "density field: rho is a single uniform constant in this formulation."
+  );
+  lines.push("");
   const unverified = Object.values(REFERENCES).filter((r) => r.verification === "unverified");
   if (unverified.length) {
     lines.push(

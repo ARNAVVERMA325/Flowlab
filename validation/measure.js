@@ -15,8 +15,12 @@ import {
 } from "../solver/ns2d.js";
 import { sourcePlanFor } from "../sources/compile.js";
 import { probeCell, vorticityAtCell, vorticityAtNode } from "../physics/probe.js";
+import { isFluidAt, traceStep, velocityAt } from "../physics/velocityField.js";
+import { traceStreamlines } from "../physics/streamlines.js";
+import { PathlineSet } from "../tracer/pathlines.js";
 import { sampleDocument } from "../geometry/document.js";
 import { bendDocument, cylinderDocument } from "../geometry/documents.js";
+import { SCENARIOS, buildScenario } from "../scenarios/index.js";
 
 import {
   runCavityToSteadyState,
@@ -567,6 +571,118 @@ function measureProbeQuantities() {
   ];
 }
 
+// The M8 curve families against solid-body rotation, whose exact streamlines
+// are circles. Mirrors tests/test17_m8_visualization.js.
+function measureFlowCurves() {
+  const fillField = (grid, uAt, vAt) => {
+    const { nx, ny, h } = grid;
+    for (let j = 0; j <= ny + 1; j++) {
+      for (let i = 0; i <= nx + 1; i++) {
+        const k = grid.idx(i, j);
+        grid.u[k] = uAt(i * h, (j - 0.5) * h);
+        grid.v[k] = vAt((i - 0.5) * h, j * h);
+      }
+    }
+  };
+
+  // Interpolation on a linear field, where the answer is exact.
+  const linear = new StaggeredGrid(9, 7, 0.25);
+  fillField(linear, (x) => 3 * x + 1, (_x, y) => -2 * y);
+  let interpolation = 0;
+  for (let n = 0; n < 400; n++) {
+    const x = (((n * 37) % 100) / 100) * linear.nx * linear.h;
+    const y = (((n * 53) % 100) / 100) * linear.ny * linear.h;
+    const { u, v } = velocityAt(linear, x, y);
+    interpolation = Math.max(interpolation, Math.abs(u - (3 * x + 1)), Math.abs(v - -2 * y));
+  }
+
+  // The integrator, on a field whose trajectories are circles.
+  const grid = new StaggeredGrid(40, 40, 0.05);
+  const omega = 2.0;
+  const cx = (grid.nx * grid.h) / 2;
+  const cy = (grid.ny * grid.h) / 2;
+  fillField(grid, (_x, y) => -omega * (y - cy), (x) => omega * (x - cx));
+
+  const radius = 0.5;
+  const ds = grid.h / 2;
+  const steps = 900;
+  const drift = (stepper) => {
+    let x = cx + radius;
+    let y = cy;
+    let worst = 0;
+    for (let n = 0; n < steps; n++) {
+      const next = stepper(x, y);
+      if (next === null) break;
+      x = next.x;
+      y = next.y;
+      worst = Math.max(worst, Math.abs(Math.hypot(x - cx, y - cy) - radius));
+    }
+    return worst / radius;
+  };
+  const euler = drift((x, y) => {
+    const { u, v } = velocityAt(grid, x, y);
+    const speed = Math.hypot(u, v);
+    if (speed === 0) return null;
+    return { x: x + (u / speed) * ds, y: y + (v / speed) * ds };
+  });
+  const streamline = drift((x, y) => traceStep(grid, x, y, ds));
+
+  // A parcel released at the same point and advanced in time through the same
+  // unchanging field: the steady-flow case where the two curves must coincide.
+  const set = new PathlineSet(grid, { count: 0 });
+  set.spawnable = [[1, 1]];
+  const parcel = { x: cx + radius, y: cy, trail: [], age: 0 };
+  set.trail = 100000;
+  set.particles.push(parcel);
+  for (let n = 0; n < 400; n++) set.advance(grid, 0.002);
+  let pathline = 0;
+  for (const point of parcel.trail) {
+    pathline = Math.max(pathline, Math.abs(Math.hypot(point.x - cx, point.y - cy) - radius));
+  }
+  pathline /= radius;
+
+  // And the invariant that matters most in a real domain.
+  let escaped = 0;
+  let traced = 0;
+  for (const scenario of SCENARIOS) {
+    const built = buildScenario(scenario.id);
+    for (let n = 0; n < 40; n++) {
+      step(built.grid, built.bc, { ...built.params, dt: 1e-4 });
+    }
+    for (const line of traceStreamlines(built.grid, { spacing: built.grid.h * 6 })) {
+      for (const point of line.points) {
+        traced++;
+        if (!isFluidAt(built.grid, point.x, point.y)) escaped++;
+      }
+    }
+  }
+
+  return [
+    {
+      quantity: "interpolation error on a linear field",
+      measured: interpolation,
+      context: "u = 3x + 1, v = -2y, sampled at 400 points off the cell centres",
+    },
+    {
+      quantity: "streamline radius drift in solid-body rotation, 900 steps",
+      measured: streamline,
+      context:
+        `as a fraction of a radius of ${radius}; forward Euler on the same field ` +
+        `drifts ${(euler * 100).toFixed(1)}%`,
+    },
+    {
+      quantity: "pathline radius drift in the same field",
+      measured: pathline,
+      context: "400 steps of dt = 2e-3 - the steady-flow case where a pathline is a streamline",
+    },
+    {
+      quantity: "streamline points outside the fluid, all scenarios",
+      measured: escaped,
+      context: `over ${traced} traced points in ${SCENARIOS.length} scenarios`,
+    },
+  ];
+}
+
 const MEASURERS = {
   "still-water": measureStillWater,
   "uniform-channel": measureUniformChannel,
@@ -578,6 +694,7 @@ const MEASURERS = {
   "drawn-geometry": measureDrawnGeometry,
   "interior-sources": measureInteriorSources,
   "probe-quantities": measureProbeQuantities,
+  "flow-curves": measureFlowCurves,
 };
 
 export async function measureCase(caseId) {

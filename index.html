@@ -127,6 +127,7 @@
   .geomrow .gdrop:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
   .geomrow .gindex { color: var(--ink-dim); width: 18px; flex: none; text-align: right; }
   #geomlist:empty::after { content: "no shapes drawn"; color: var(--ink-dim); font-size: 12px; }
+  .ctnote { color: var(--ink-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
   .drawstatus {
     color: var(--ink-dim); font-size: 12px; margin: -4px 0 10px;
     min-height: 1.5em; font-variant-numeric: tabular-nums;
@@ -175,6 +176,13 @@
         <select id="mode" aria-label="View"></select>
         <button id="reseed">Reseed dye</button>
         <button id="cleardye">Clear dye</button>
+      </div>
+      <div class="controls">
+        <span class="ctlabel">overlay</span>
+        <label><input type="checkbox" id="showvectors"> vectors</label>
+        <label><input type="checkbox" id="showstreamlines"> streamlines</label>
+        <label><input type="checkbox" id="showpathlines"> pathlines</label>
+        <span id="overlaynote" class="ctnote">-</span>
       </div>
       <div class="controls">
         <span class="ctlabel">draw</span>

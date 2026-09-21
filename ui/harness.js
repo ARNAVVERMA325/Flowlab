@@ -52,6 +52,10 @@ import { BRUSH_DEFAULTS, BrushController } from "./brush.js";
 import { PROBE_QUANTITIES } from "./probes.js";
 import { probeAt } from "../physics/probe.js";
 import { drawProbeMarkers } from "../visualization/probeOverlay.js";
+import {
+  arrowStride, drawPolylines, drawVectors, sampleVectors,
+} from "../visualization/flowOverlay.js";
+import { traceStreamlines } from "../physics/streamlines.js";
 import { drawSeries } from "../visualization/timeseries.js";
 import { describeSource } from "../sources/kinds.js";
 import {
@@ -128,6 +132,13 @@ export class Harness {
     this.previewSummary = null;
     this.editMessage = null;
     this.showRegions = true;
+    // Overlays are independent of the colour map, not alternatives to it: the
+    // reference gallery shows streamlines drawn over a velocity-magnitude
+    // field, and making them mutually exclusive would forbid the most useful
+    // combination for no reason. Each is a pure display toggle, exactly as
+    // #showregions already is.
+    this.overlays = { vectors: false, streamlines: false, pathlines: false };
+    this.overlayCounts = null;
     // Probe display state. The probes themselves live in the session, which is
     // what samples them; these three are only about what is being looked at.
     this.hoverPoint = null;
@@ -345,6 +356,19 @@ export class Harness {
       this.showRegions = regions.checked;
       this.draw();
     });
+
+    for (const [id, name] of [
+      ["#showvectors", "vectors"],
+      ["#showstreamlines", "streamlines"],
+      ["#showpathlines", "pathlines"],
+    ]) {
+      const box = root.querySelector(id);
+      box.checked = this.overlays[name];
+      box.addEventListener("change", () => {
+        this.overlays[name] = box.checked;
+        this.draw();
+      });
+    }
 
     // Pointer rather than mouse events, so a stylus or a touch drag works and
     // so capture is available: a drag that leaves the canvas keeps reporting,
@@ -758,7 +782,16 @@ export class Harness {
       this.failureKind = "field";
     }
 
-    const view = prepareView(this.mode, { grid, tracer: this.tracer });
+    // The compiled source plan and the solver's own divergence bound are
+    // handed in, so the continuity view measures what the panel measures and
+    // scales against the promise step() actually makes. Reading either from a
+    // second place is how the panel and the picture start disagreeing.
+    const view = prepareView(this.mode, {
+      grid,
+      tracer: this.tracer,
+      sources: this.sourcePlan,
+      divergenceTol: this.scenario.params.divergenceTol,
+    });
     // The preview and the region overlay are drawn through the renderer's tint
     // hook, inside the loop that already visits every cell, and the count of
     // affected cells is taken from that same pass. Counting separately would be
@@ -774,6 +807,7 @@ export class Harness {
       scale: this.scale,
       band: BAND,
     });
+    this.drawFlowOverlays(grid, view);
     // Last, so a marker is never painted over by the picture it refers to.
     drawProbeMarkers(this.renderer.context, this.session.probes.probes, {
       originX: MARGIN,
@@ -1061,6 +1095,95 @@ export class Harness {
     }
     this.draw();
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Flow overlays: vectors, streamlines, pathlines
+  // ---------------------------------------------------------------------------
+
+  // All three read the field and draw on the canvas. None of them touches the
+  // simulation, which is M3's rule and is what makes a toggle here the same
+  // kind of thing as switching the colour map.
+  //
+  // Streamlines are TRACED here, on every repaint, because they are an
+  // instantaneous object: the curve tangent to the field a moment ago is not
+  // the curve tangent to it now, and caching one would show a picture of a
+  // field that no longer exists. Measured worst case 4.4 ms on the cylinder,
+  // the largest grid here, against an 86 ms solver step. Pathlines are the
+  // opposite - they are state, advanced by the session on every step - so
+  // nothing is computed for them here beyond reading the trails.
+  drawFlowOverlays(grid, view) {
+    const context = this.renderer.context;
+    const placement = {
+      originX: MARGIN, originY: MARGIN, scale: this.scale, h: grid.h, ny: grid.ny,
+    };
+    const counts = { vectors: 0, streamlines: 0, pathlines: 0, stride: null };
+
+    if (this.overlays.pathlines) {
+      // Drawn first, so an arrow or a streamline is never hidden behind a
+      // trail. Faded along their length, which is what says which end is now.
+      const trails = this.session.pathlines.particles
+        .map((particle) => particle.trail)
+        .filter((trail) => trail.length >= 2);
+      counts.pathlines = drawPolylines(context, trails, placement, {
+        colour: "rgba(255,241,118,0.85)", width: 1.1, fade: true,
+      });
+    }
+
+    if (this.overlays.streamlines) {
+      const lines = traceStreamlines(grid, {
+        // Six cells between seeds, half a cell per step. Both measured rather
+        // than picked: at this spacing the cylinder yields 112 lines for
+        // 4.4 ms, and the pair of lengths (seeds at `spacing`, separation at
+        // half of it) is what takes the smooth bend from 4 lines to 13.
+        spacing: grid.h * 6,
+        ds: grid.h / 2,
+      });
+      counts.streamlines = drawPolylines(context, lines, placement, {
+        colour: "rgba(255,255,255,0.62)", width: 1,
+      });
+    }
+
+    if (this.overlays.vectors) {
+      // The reference speed comes from the VELOCITY scale, not from whatever
+      // the colour map happens to be showing: an arrow's length means speed
+      // whether the picture underneath is pressure, vorticity or dye, and
+      // borrowing an unrelated scale would make it mean nothing.
+      const reference = view !== null && view.id === "velocity" && Number.isFinite(view.scale.hi)
+        ? view.scale.hi
+        : null;
+      const sampled = sampleVectors(grid, { stride: arrowStride(this.scale), reference });
+      counts.vectors = drawVectors(context, sampled, placement, {});
+      counts.stride = sampled.stride;
+      counts.reference = sampled.reference;
+    }
+
+    this.overlayCounts = counts;
+    this.updateOverlayNote();
+  }
+
+  updateOverlayNote() {
+    const node = this.root.querySelector("#overlaynote");
+    const counts = this.overlayCounts;
+    const parts = [];
+    if (this.overlays.vectors && counts) {
+      parts.push(
+        `${integer(counts.vectors)} arrows every ${integer(counts.stride)} cells, ` +
+        `longest = ${exponential(counts.reference, 2)}`
+      );
+    }
+    if (this.overlays.streamlines && counts) {
+      parts.push(`${integer(counts.streamlines)} streamlines (this instant)`);
+    }
+    if (this.overlays.pathlines && counts) {
+      parts.push(
+        `${integer(counts.pathlines)} of ${integer(this.session.pathlines.count)} parcels ` +
+        `(trails over time)`
+      );
+    }
+    node.textContent = parts.length === 0
+      ? "none - streamlines are tangent to the field now, pathlines are where parcels have been"
+      : parts.join("  -  ");
   }
 
   // ---------------------------------------------------------------------------
@@ -1441,7 +1564,7 @@ export class Harness {
     // Same rule as the peak readout: a scale drawn from a partly broken field
     // is not a scale anyone should read a value off, and prepareView hands
     // back NaN bounds rather than the survivors' range when that happens.
-    const { lo, hi, centre, clipped } = view.scale;
+    const { lo, hi, centre, clipped, breached } = view.scale;
     set("#legendmin", exponential(lo, 2), isBad(lo));
     set("#legendmid", centre === null ? "" : exponential(centre, 2));
     set("#legendmax", exponential(hi, 2), isBad(hi));
@@ -1460,6 +1583,24 @@ export class Harness {
         `ramp. The true range is ${exponential(clipped.trueLo, 2)} to ` +
         `${exponential(clipped.trueHi, 2)}, set by the sharpest feature in the ` +
         `geometry rather than by the flow.`;
-    set("#viewnote", view.note + clipNote);
+    // A fixed scale says what it is anchored to, and whether anything is past
+    // it. A breach here is not a display trade-off like the percentile clip -
+    // it is the solver failing to deliver the bound it promises, so it is
+    // stated in those terms and marked bad.
+    let boundNote = "";
+    if (breached !== null && breached !== undefined) {
+      const bound = view.scale.bound;
+      boundNote = breached.cells === 0
+        ? ` Scale fixed at +-${exponential(hi, 0)}, a decade past the solver's ` +
+          `divergence tolerance of ${exponential(bound, 0)}. Worst cell ` +
+          `${exponential(breached.worst, 2)} over ${integer(breached.of)} fluid cells - ` +
+          `inside the bound, which is what a near-uniform picture here means.`
+        : ` ${integer(breached.cells)} of ${integer(breached.of)} cells are PAST the ` +
+          `solver's divergence tolerance of ${exponential(bound, 0)}, worst ` +
+          `${exponential(breached.worst, 2)}. That is the projection failing to deliver ` +
+          `what it promises, not a scaling choice.`;
+    }
+    set("#viewnote", view.note + clipNote + boundNote,
+      Boolean(breached && breached.cells > 0));
   }
 }

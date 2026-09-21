@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-21 04:52:15 UTC",
+  "generatedAt": "2026-09-21 07:30:37 UTC",
   "cases": {
     "still-water": {
       "label": "Still water",
@@ -469,6 +469,55 @@
           "reference": 0,
           "measured": 0,
           "tolerance": 1e-15,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        }
+      ]
+    },
+    "flow-curves": {
+      "label": "Streamlines and pathlines",
+      "classification": "benchmarked",
+      "reference": {
+        "id": "solidBodyRotation",
+        "citation": "Solid-body rotation u = -omega*(y-yc), v = omega*(x-xc): every streamline is a circle of constant radius about (xc, yc), and the vorticity is 2*omega everywhere.",
+        "verification": "derived"
+      },
+      "caveat": "Nothing here validates the FLOW, only the curves drawn through it: a streamline is exactly as accurate as the field it is traced in. Two further limits are structural rather than measured. Faces inside a body hold reflected values the solver keeps for its no-slip stencil, so a trajectory within half a cell of a surface samples one - bounded by stopping every curve at the first solid cell, not eliminated. And the even spacing between streamlines is an occupancy-grid approximation of Jobard & Lefebvre (1997), not that algorithm: the separation test is per-cell rather than a true distance.",
+      "measuredBy": "tests/test17_m8_visualization.js",
+      "claims": [
+        {
+          "quantity": "interpolation error on a linear field",
+          "reference": 0,
+          "measured": 4.440892098500626e-16,
+          "tolerance": 1e-12,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "streamline radius drift in solid-body rotation, 900 steps",
+          "reference": 0,
+          "measured": 0.0003512129166107769,
+          "tolerance": 0.01,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "pathline radius drift in the same field",
+          "reference": 0,
+          "measured": 1.2800001281121354e-8,
+          "tolerance": 0.01,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "streamline points outside the fluid, all scenarios",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 0,
           "relative": false,
           "referenceType": "invariant",
           "result": "pass"

@@ -880,6 +880,188 @@ describe("browser", { skip }, () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // M8: overlays and the two new colour maps
+  // -------------------------------------------------------------------------
+
+  test("each overlay changes the picture and none of them touches the run", async () => {
+    // Overlays are independent of the colour map, not alternatives to it, so
+    // each is checked on its own AND all three together. The assertion is on a
+    // CHECKSUM of the canvas rather than on the checkbox's state: the first
+    // version of the vector overlay drew 332 arrows in the same colour as the
+    // field underneath them, reported 332 in the readout, and was invisible.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(200);
+      await page.click("#run");
+      await page.waitForTimeout(2500);
+      await page.click("#pause");
+
+      const checksum = () => page.evaluate(() => {
+        const c = document.querySelector("#field");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 53) sum = (sum * 31 + d[i]) >>> 0;
+        return sum;
+      });
+
+      const plain = await readState(page);
+      const bare = await checksum();
+      assert.match(plain.panel.overlaynote, /none/);
+
+      for (const [control, name, pattern] of [
+        ["#showvectors", "vectors", /\d+ arrows every \d+ cells/],
+        ["#showstreamlines", "streamlines", /\d+ streamlines \(this instant\)/],
+        ["#showpathlines", "pathlines", /\d+ of \d+ parcels/],
+      ]) {
+        await page.check(control);
+        await page.waitForTimeout(300);
+        const on = await readState(page);
+        assert.equal(on.solver.overlays[name], true);
+        assert.match(on.panel.overlaynote, pattern, `${name} readout: ${on.panel.overlaynote}`);
+        assert.notEqual(
+          await checksum(), bare,
+          `turning ${name} on must change the picture, not just the readout`
+        );
+        // An overlay is a pure display change - M3's rule.
+        assert.equal(on.solver.iteration, plain.solver.iteration, `${name} stepped the run`);
+        assert.equal(on.solver.state, plain.solver.state);
+
+        await page.uncheck(control);
+        await page.waitForTimeout(300);
+        assert.equal(await checksum(), bare, `turning ${name} off must restore the picture`);
+      }
+
+      // All three at once, which is the combination the reference gallery
+      // shows and which making them mutually exclusive would forbid.
+      for (const control of ["#showvectors", "#showstreamlines", "#showpathlines"]) {
+        await page.check(control);
+      }
+      await page.waitForTimeout(400);
+      const all = await readState(page);
+      assert.deepEqual(all.solver.overlays, { vectors: true, streamlines: true, pathlines: true });
+      assert.ok(all.solver.overlayCounts.vectors > 0);
+      assert.ok(all.solver.overlayCounts.streamlines > 0);
+      assert.ok(all.solver.overlayCounts.pathlines > 0);
+      assert.equal(all.solver.iteration, plain.solver.iteration);
+    });
+  });
+
+  test("pathlines accumulate while the run advances, and reset with the field", async () => {
+    // Pathlines are the one overlay that is STATE rather than a reading of the
+    // current field, so the thing worth checking is that they have a history
+    // and that the history does not outlive the flow it came from.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(250);
+      const trails = () => page.evaluate(() => {
+        const ps = window.__flowlab.session.pathlines.particles;
+        return ps.reduce((a, p) => a + p.trail.length, 0) / ps.length;
+      });
+      // Advanced on every step whether or not the overlay is on, so turning it
+      // on shows a trail instead of starting to grow one.
+      assert.ok(await trails() < 1.5, "a fresh field has no history yet");
+
+      await page.click("#run");
+      await page.waitForTimeout(2500);
+      await page.click("#pause");
+      const grown = await trails();
+      assert.ok(grown > 5, `trails averaged ${grown} points after a run`);
+
+      await page.check("#showpathlines");
+      await page.waitForTimeout(300);
+      const shown = await readState(page);
+      assert.ok(
+        shown.solver.overlayCounts.pathlines > 0,
+        "the trails that already exist must be drawn immediately"
+      );
+      assert.equal(shown.solver.parcels, 300);
+
+      // Reset rebuilds the field, so the histories go with it - the same rule
+      // the probe series follows, and for the same reason.
+      await page.click("#reset");
+      await page.waitForTimeout(400);
+      assert.ok(await trails() < 1.5, "a rebuilt field must not keep the old trails");
+      assert.equal((await readState(page)).solver.iteration, 0);
+    });
+  });
+
+  test("a healthy solve does not paint the continuity view as a failure", async () => {
+    // The regression this view was rebuilt for. Anchoring its fixed scale AT
+    // the solver's divergence tolerance produced a full-contrast noise field
+    // for a perfectly converged run, because a converged solve stops at its
+    // tolerance rather than far below it. Checked here on the real canvas,
+    // because that is where it was visible and nowhere else.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(200);
+      await page.click("#run");
+      await page.waitForTimeout(2500);
+      await page.click("#pause");
+
+      await page.selectOption("#mode", "continuity");
+      await page.waitForTimeout(300);
+      const state = await readState(page);
+      assert.equal(state.solver.mode, "continuity");
+      assert.match(state.panel.viewnote, /inside the bound/);
+      assert.doesNotMatch(state.panel.viewnote, /PAST the/);
+
+      // How far the painted field actually strays from the centre colour. A
+      // near-uniform picture is the correct one here; anything else is the
+      // solver's rounding noise dressed as structure.
+      const spread = await page.evaluate(() => {
+        const c = document.querySelector("#field");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        const centre = [0x2a, 0x2a, 0x28];   // the diverging ramp's middle stop
+        let worst = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          const away = Math.max(
+            Math.abs(d[i] - centre[0]), Math.abs(d[i + 1] - centre[1]),
+            Math.abs(d[i + 2] - centre[2])
+          );
+          if (away > worst) worst = away;
+        }
+        return worst;
+      });
+      // The margin, the bands and the solid body are all far from the centre
+      // colour, so this cannot be tight - but a saturated field reaches 200+
+      // and the earlier broken version did exactly that across the whole
+      // domain. Measured as a fraction of cells instead would be tighter; this
+      // is the crude version that a rebuild of the scale cannot sneak past.
+      const fractionOff = await page.evaluate(() => {
+        const c = document.querySelector("#field");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        const centre = [0x2a, 0x2a, 0x28];
+        let off = 0;
+        let total = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          total++;
+          const away = Math.max(
+            Math.abs(d[i] - centre[0]), Math.abs(d[i + 1] - centre[1]),
+            Math.abs(d[i + 2] - centre[2])
+          );
+          if (away > 60) off++;
+        }
+        return off / total;
+      });
+      assert.ok(
+        fractionOff < 0.12,
+        `${(fractionOff * 100).toFixed(1)}% of the canvas is far from the centre colour - ` +
+        `that is a picture of a broken simulation, and this one is converged (peak ` +
+        `pixel distance ${spread})`
+      );
+
+      // Vorticity, by contrast, SHOULD have structure - it is a real field.
+      await page.selectOption("#mode", "vorticity");
+      await page.waitForTimeout(300);
+      const vorticity = await readState(page);
+      assert.match(vorticity.panel.viewnote, /centred on ZERO|sign carries/);
+      assert.equal(vorticity.solver.iteration, state.solver.iteration);
+      assert.ok(Number(vorticity.panel.legend[0]) < 0, "a diverging scale runs either side of zero");
+      assert.equal(Number(vorticity.panel.legend[1]), 0, "and is centred on zero");
+    });
+  });
+
   test("switching the view does not touch the simulation", async () => {
     // M3's rule: changing what is displayed is a pure display change.
     await withApp(async ({ page }) => {
@@ -895,7 +1077,9 @@ describe("browser", { skip }, () => {
       // defines them so the two cannot drift.
       const modes = await page.evaluate(() =>
         [...document.querySelectorAll("#mode option")].map((o) => o.value));
-      assert.deepEqual(modes, ["velocity", "pressure", "dye"]);
+      assert.deepEqual(
+        modes, ["velocity", "pressure", "vorticity", "continuity", "dye"]
+      );
       for (const mode of modes) {
         await page.selectOption("#mode", mode);
         await page.waitForTimeout(120);

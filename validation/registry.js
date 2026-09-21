@@ -131,6 +131,22 @@ export const REFERENCES = {
       "exact, which pins the formula but says nothing about its order.",
   },
 
+  solidBodyRotation: {
+    id: "solidBodyRotation",
+    citation:
+      "Solid-body rotation u = -omega*(y-yc), v = omega*(x-xc): every " +
+      "streamline is a circle of constant radius about (xc, yc), and the " +
+      "vorticity is 2*omega everywhere.",
+    verification: "derived",
+    verificationNote:
+      "Immediate from the definitions - the velocity is everywhere " +
+      "perpendicular to the radius, so the radius cannot change. Chosen as the " +
+      "reference for the trajectory integrator because it is the case where a " +
+      "first-order scheme fails visibly rather than subtly: Euler's radius " +
+      "grows without bound, drawing a recirculation that decays when the " +
+      "simulation's does not.",
+  },
+
   planePoiseuille: {
     id: "planePoiseuille",
     citation:
@@ -424,6 +440,41 @@ export const CASES = [
       { quantity: "vorticity at a cell centre, order of convergence (Taylor-Green)", reference: 2, tolerance: 0.15, referenceType: "analytical" },
       { quantity: "vorticity in solid-body rotation, exact", reference: 0, tolerance: 1e-14, referenceType: "analytical" },
       { quantity: "velocity at a cell vs its own faces, linear field", reference: 0, tolerance: 1e-15, referenceType: "invariant" },
+    ],
+  },
+  {
+    id: "flow-curves",
+    label: "Streamlines and pathlines",
+    classification: "benchmarked",
+    measuredBy: "tests/test17_m8_visualization.js",
+    reference: "solidBodyRotation",
+    rationale:
+      "The M8 curve families, against a field whose exact trajectories are " +
+      "known. Three things are established. The INTERPOLATION these integrate " +
+      "is exact on a linear field, which is what catches a half-cell offset " +
+      "between the two staggered components - an error that still draws a " +
+      "plausible flow. The INTEGRATOR holds a circle in solid-body rotation: " +
+      "midpoint drifts 0.04% of the radius over 900 steps where forward Euler " +
+      "drifts 80%, which is the measurement behind choosing RK2. And in a " +
+      "STEADY field a pathline and the streamline through the same point are " +
+      "the same curve, which is the claim that makes computing both worth " +
+      "doing - in an unsteady field they are not, and no snapshot can produce " +
+      "the second.",
+    caveat:
+      "Nothing here validates the FLOW, only the curves drawn through it: a " +
+      "streamline is exactly as accurate as the field it is traced in. Two " +
+      "further limits are structural rather than measured. Faces inside a " +
+      "body hold reflected values the solver keeps for its no-slip stencil, " +
+      "so a trajectory within half a cell of a surface samples one - bounded " +
+      "by stopping every curve at the first solid cell, not eliminated. And " +
+      "the even spacing between streamlines is an occupancy-grid " +
+      "approximation of Jobard & Lefebvre (1997), not that algorithm: the " +
+      "separation test is per-cell rather than a true distance.",
+    claims: [
+      { quantity: "interpolation error on a linear field", reference: 0, tolerance: 1e-12, referenceType: "invariant" },
+      { quantity: "streamline radius drift in solid-body rotation, 900 steps", reference: 0, tolerance: 0.01, referenceType: "analytical" },
+      { quantity: "pathline radius drift in the same field", reference: 0, tolerance: 0.01, referenceType: "analytical" },
+      { quantity: "streamline points outside the fluid, all scenarios", reference: 0, tolerance: 0, referenceType: "invariant" },
     ],
   },
 ];

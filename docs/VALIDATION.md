@@ -4,7 +4,7 @@
 
 Every number below was measured by running the solver through the same harnesses the test suite uses (`validation/measure.js`), and compared against references declared in `validation/registry.js`. A hand-maintained validation record can drift from the code while still reading as authority, which is the one failure mode a document like this must not have.
 
-Generated 2026-09-21 04:52:15 UTC.
+Generated 2026-09-21 07:30:37 UTC.
 
 ## How to read this
 
@@ -40,6 +40,7 @@ The distinction carries real weight. A cavity agreeing with published measuremen
 | Drawn geometry and surface conditions | `self-validated` | invariants only | — |
 | Interior sources | `self-validated` | invariants only | — |
 | Probe quantities | `benchmarked` | taylorGreenVorticity | `derived` |
+| Streamlines and pathlines | `benchmarked` | solidBodyRotation | `derived` |
 
 ## Still water
 
@@ -243,6 +244,29 @@ Vorticity is the one quantity M7 adds that is not simply read out of the field, 
 | vorticity in solid-body rotation, exact | 0 | 1.776e-15<br><sub>angular rate 1.75, so the answer is exactly 3.5 everywhere</sub> | 1.000e-14 | pass |
 | velocity at a cell vs its own faces, linear field | 0 | 0<br><sub>u = 3x, v = -2y, where the face average is the exact centre value</sub> | 1.000e-15 | pass |
 
+## Streamlines and pathlines
+
+**Classification:** `benchmarked` — checked against a reference external to this project, so being wrong is detectable from outside
+
+**Asserted by:** `tests/test17_m8_visualization.js`
+
+The M8 curve families, against a field whose exact trajectories are known. Three things are established. The INTERPOLATION these integrate is exact on a linear field, which is what catches a half-cell offset between the two staggered components - an error that still draws a plausible flow. The INTEGRATOR holds a circle in solid-body rotation: midpoint drifts 0.04% of the radius over 900 steps where forward Euler drifts 80%, which is the measurement behind choosing RK2. And in a STEADY field a pathline and the streamline through the same point are the same curve, which is the claim that makes computing both worth doing - in an unsteady field they are not, and no snapshot can produce the second.
+
+**Reference:** Solid-body rotation u = -omega*(y-yc), v = omega*(x-xc): every streamline is a circle of constant radius about (xc, yc), and the vorticity is 2*omega everywhere.
+
+**Verification:** reproducible from the equations
+
+> Immediate from the definitions - the velocity is everywhere perpendicular to the radius, so the radius cannot change. Chosen as the reference for the trajectory integrator because it is the case where a first-order scheme fails visibly rather than subtly: Euler's radius grows without bound, drawing a recirculation that decays when the simulation's does not.
+
+> ⚠️ **Caveat.** Nothing here validates the FLOW, only the curves drawn through it: a streamline is exactly as accurate as the field it is traced in. Two further limits are structural rather than measured. Faces inside a body hold reflected values the solver keeps for its no-slip stencil, so a trajectory within half a cell of a surface samples one - bounded by stopping every curve at the first solid cell, not eliminated. And the even spacing between streamlines is an occupancy-grid approximation of Jobard & Lefebvre (1997), not that algorithm: the separation test is per-cell rather than a true distance.
+
+| quantity | reference | measured | tolerance | result |
+|---|---|---|---|---|
+| interpolation error on a linear field | 0 | 4.441e-16<br><sub>u = 3x + 1, v = -2y, sampled at 400 points off the cell centres</sub> | 1.000e-12 | pass |
+| streamline radius drift in solid-body rotation, 900 steps | 0 | 3.512e-4<br><sub>as a fraction of a radius of 0.5; forward Euler on the same field drifts 80.3%</sub> | 0.01 | pass |
+| pathline radius drift in the same field | 0 | 1.280e-8<br><sub>400 steps of dt = 2e-3 - the steady-flow case where a pathline is a streamline</sub> | 0.01 | pass |
+| streamline points outside the fluid, all scenarios | 0 | 0<br><sub>over 15475 traced points in 6 scenarios</sub> | 0 | pass |
+
 ## Known limitations
 
 Carried forward from `docs/M1-solver-hardening.md`, which has the detail:
@@ -263,6 +287,8 @@ From `docs/M6-sources.md`: with a mass source running the flow is non-solenoidal
 From `docs/M5-interactive-geometry.md`: drawn shapes are SAMPLED onto the existing uniform grid - cell centres tested against a region - not meshed, so the staircase limitation above applies to anything drawn as much as to the cylinder. Solid surfaces can now carry the full condition set where they are axis-aligned; on a staircase surface, which has no single normal, only wall and free-slip are allowed and a flux-prescribing condition is refused rather than approximated. A domain whose fluid splits into regions is solved when every region's flux can be absorbed and REJECTED WITH A REASON when it cannot, rather than reported as converged; the pre-M5 solver reported 8.1e-8 for a field whose actual max|div u| was 2.950e-1 in one such case. The outer domain stays a rectangle and per-region pressure solving is deferred.
 
 From `docs/M7-probes.md`: a probe reports a CELL, not an interpolated point - velocities averaged from that cell's own faces, vorticity from its four corners - so nothing it shows resolves finer than one cell. The vorticity it reports is second order in the interior and measured as such below; against a wall the corner values come from the surface faces, making that estimate one-sided and first order, and that is NOT measured. Pressure is reported with its datum named, because with nothing prescribing a pressure the field is only defined up to a constant and the solver fixes it by zero-meaning. The per-probe Reynolds number is the CELL Reynolds number |u|h/nu, which is a property of the mesh as much as of the flow and is smaller than the scenario's Reynolds number by a factor of 4 to 192 across these cases.
+
+From `docs/M8-visualization.md`: the streamline and pathline overlays are drawn from a BILINEAR interpolation of the velocity field, which is exact on a linear field and is deliberately not what a probe does - a trajectory passes between cell centres, a reading does not. Curves stop at the first solid cell, which bounds but does not eliminate their exposure to the reflected in-body face values the solver keeps for its no-slip stencil. Even spacing between streamlines is an occupancy-grid approximation of Jobard & Lefebvre (1997), not that algorithm. None of these curves validates the flow - a streamline is exactly as accurate as the field it is traced in. There is no density view because there is no density field: rho is a single uniform constant in this formulation.
 
 **1 reference is still unverified** (cylinderWakeLength). Any claim resting on it is weaker than the rest of this document, and should be read that way. Each one records what closing it would take, so it stays a piece of open work rather than a permanent disclaimer:
 

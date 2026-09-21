@@ -1370,11 +1370,34 @@ function countImposedCells(grid, mass) {
 // written as "divergence" because q had always been zero. Measured with a
 // source running: this reads 8.5702e-8 against a raw max|div u| of 1.8000e+0,
 // and agrees with (dt/rho)*residual to 1.21e-18.
+// The SIGNED continuity error at one fluid cell: div u - q.
+//
+// Exported per-cell because a reduction wants the magnitude and a picture
+// wants the sign, and letting those be two implementations of "what does this
+// cell violate" is precisely the shape this project keeps finding. The
+// reduction below calls this, so there is one definition of the quantity and
+// the divergence view cannot disagree with the number in the panel.
+//
+// Written with inline stride arithmetic rather than through idxFor, which
+// returns a closure: this is called once per fluid cell per frame and an
+// allocation per cell is not free.
+export function continuityErrorAt(grid, sources, i, j) {
+  const { h, u, v, stride } = grid;
+  const k = i + stride * j;
+  const mass = sources === null || sources === undefined ? null : (sources.mass ?? null);
+  let imposed = 0;
+  if (mass !== null) {
+    const row = mass.cells[k];
+    if (row >= 0) imposed = mass.table[row].q;
+  }
+  return (u[k] - u[k - 1]) / h + (v[k] - v[k - stride]) / h - imposed;
+}
+
 export function computeContinuityError(grid, sources = null) {
   const mass = sources === null ? null : (sources.mass ?? null);
   if (mass === null) return computeDivergence(grid);
 
-  const { nx, ny, h, u, v, solid } = grid;
+  const { nx, ny, solid } = grid;
   const idx = idxFor(grid);
   let max = 0;
   let sumSquares = 0;
@@ -1385,11 +1408,7 @@ export function computeContinuityError(grid, sources = null) {
     for (let i = 1; i <= nx; i++) {
       const k = idx(i, j);
       if (solid[k]) continue;
-      const row = mass.cells[k];
-      const imposed = row >= 0 ? mass.table[row].q : 0;
-      const value = Math.abs(
-        (u[k] - u[idx(i - 1, j)]) / h + (v[k] - v[idx(i, j - 1)]) / h - imposed
-      );
+      const value = Math.abs(continuityErrorAt(grid, sources, i, j));
       // Same rule as computeDivergence: non-finite cells are COUNTED, never
       // folded into the maximum, because `a > max` is false for NaN and would
       // silently skip them.
