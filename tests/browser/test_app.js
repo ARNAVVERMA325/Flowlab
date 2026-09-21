@@ -1062,6 +1062,105 @@ describe("browser", { skip }, () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // M9: flow analysis
+  // -------------------------------------------------------------------------
+
+  test("the analysis panel agrees with the solver, and withholds what it must", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "bend-sharp");
+      await page.waitForTimeout(250);
+      await page.click("#run");
+      await page.waitForTimeout(3000);
+      await page.click("#pause");
+
+      const state = await readState(page);
+      const fa = state.panel.fa;
+
+      // The declared Reynolds number is the scenario's own, and the panel says
+      // what it is built from rather than presenting a bare number.
+      assert.equal(state.solver.analysis.declaredRe, state.solver.scenarioRe);
+      assert.match(fa.declared, new RegExp(`^${state.solver.scenarioRe}\\b`));
+      assert.match(fa.declared, /inlet speed .* x duct width/);
+
+      // The peak figure names its own speed, uses the same length, and on this
+      // scenario is well above the declared one - the corner jet.
+      assert.match(fa.peak, /same length/);
+      assert.ok(
+        state.solver.analysis.peakRe > state.solver.analysis.declaredRe,
+        `peak ${state.solver.analysis.peakRe} vs declared ${state.solver.analysis.declaredRe}`
+      );
+
+      // Wall shear is per-face and the total is withheld, in the panel's own
+      // words and in the data behind it.
+      assert.equal(state.solver.analysis.integrable, false);
+      assert.ok(state.solver.analysis.wallFaces > 0);
+      assert.match(fa.wall, /total force withheld/);
+
+      // The rotation count declares its margin rather than using a bare Q > 0.
+      assert.match(fa.rot, /rotating.*straining.*balanced.*margin/);
+
+      // This bend separates at the inner corner, which is the whole point of
+      // the sharp-versus-smooth comparison.
+      assert.ok(state.solver.analysis.separations > 0, "the sharp bend must separate");
+      assert.doesNotMatch(fa.sep, /^none$/);
+    });
+  });
+
+  test("a pure shear channel is not reported as recirculating", async () => {
+    // The regression, end to end. A bare Q > 0 test reported 49.2% of a fully
+    // developed Poiseuille channel as rotating, because pure shear puts Q
+    // analytically at zero and its sign is then decided by rounding.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "pressure-channel");
+      await page.waitForTimeout(250);
+      await page.click("#run");
+      await page.waitForTimeout(4000);
+      await page.click("#pause");
+
+      const state = await readState(page);
+      const fraction = state.solver.analysis.rotating / state.solver.analysis.fluid;
+      assert.ok(
+        fraction < 0.05,
+        `${(fraction * 100).toFixed(1)}% of a shear flow reported as rotating`
+      );
+      assert.match(state.panel.fa.rot, /balanced/);
+      // And the channel's walls are found at all - they are boundary
+      // conditions rather than solid cells, and were missed entirely at first.
+      assert.ok(state.solver.analysis.wallFaces > 0, "a channel has walls");
+      assert.doesNotMatch(state.panel.fa.wall, /no no-slip wall/);
+    });
+  });
+
+  test("two probes measure a pressure drop, and one does not", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(250);
+      assert.match((await readState(page)).panel.fa.probedp, /pin two probes/);
+
+      await page.click('button.tool[data-tool="probe"]');
+      const [x1, y1] = await clientFor(page, 1.0, 3.0);
+      await page.mouse.click(x1, y1);
+      await page.waitForTimeout(200);
+      assert.match((await readState(page)).panel.fa.probedp, /pin two probes/, "one is not two");
+
+      const [x2, y2] = await clientFor(page, 12.0, 3.0);
+      await page.mouse.click(x2, y2);
+      await page.waitForTimeout(200);
+      await page.click("#run");
+      await page.waitForTimeout(2500);
+      await page.click("#pause");
+
+      const measured = (await readState(page)).panel.fa.probedp;
+      assert.match(measured, /^P2 - P1 = /);
+      assert.match(measured, /over \d/);
+      // Flow runs left to right past the cylinder, so the downstream probe
+      // reads the lower pressure and the difference is negative.
+      const value = Number(measured.match(/= (-?[\d.e+-]+)/)[1]);
+      assert.ok(value < 0, `P2 - P1 reads ${value}; downstream should be lower`);
+    });
+  });
+
   test("switching the view does not touch the simulation", async () => {
     // M3's rule: changing what is displayed is a pure display change.
     await withApp(async ({ page }) => {
@@ -1078,7 +1177,8 @@ describe("browser", { skip }, () => {
       const modes = await page.evaluate(() =>
         [...document.querySelectorAll("#mode option")].map((o) => o.value));
       assert.deepEqual(
-        modes, ["velocity", "pressure", "vorticity", "continuity", "dye"]
+        modes,
+        ["velocity", "pressure", "vorticity", "shear", "q", "continuity", "dye"]
       );
       for (const mode of modes) {
         await page.selectOption("#mode", mode);

@@ -50,7 +50,9 @@ Read this before starting any implementation session.
    | 5 | `!solid[...]` | can this face carry flow | the tracer skipped drawn outlets — dye +70.4% over 400 steps |
    | 6 | boundary faces only | does this region gain or lose volume | M6 interior mass sources — a legitimate source with an outlet was rejected |
 
-   A seventh case of the same shape turned up in M7 and is deliberately **not** in the
+   | 7 | `solid[i] !== solid[i+1]` | is there a no-slip wall at this face | M9 wall shear — the cavity's lid and the channel's walls are boundary conditions, not solid cells, so half the scenarios reported no wall at all |
+
+   A further case of the same shape turned up in M7 and is deliberately **not** in the
    table, because nothing broke: "local Re" names two quantities — the cell Reynolds
    number `|u|h/ν`, which is genuinely local, and the characteristic-length one, which is
    what the phrase usually means and is not. They differ by 4–192× across these scenarios.
@@ -223,7 +225,14 @@ Not scheduled. Do not start any of these while a NOW milestone is open.
   tests rather than left as an omission. "Divergence" is shown as the **continuity
   error** ∇·u − q, per M6.*
 - **M9 — Flow analysis**: Reynolds number, velocity gradients, shear, separation and
-  recirculation indicators, pressure drop
+  recirculation indicators, pressure drop.
+  *Built — see `docs/M9-flow-analysis.md`. Two refusals worth knowing: **integrated wall
+  force is withheld**, because summing over surface faces sums the staircase perimeter,
+  which is 4/π times a curved body's true perimeter at **every** resolution and does not
+  converge; and **recirculation is counted with a stated margin**, not at Q > 0, which is
+  a coin flip in a shear flow — a bare test reported 49.2% of a Poiseuille channel as
+  rotating. Scenarios now declare the reference (U, L) their Reynolds number is built
+  from, and a test asserts Re = U·L/ν.*
 - **M10 — Experiment mode**: guided scenarios — pipe flow, flow around a cylinder, sharp vs.
   smooth bend, Reynolds-number sweep
 - **M11 — Equation explorer**: governing equations in the UI; click a term

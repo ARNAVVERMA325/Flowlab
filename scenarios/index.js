@@ -52,6 +52,7 @@ function lidDrivenCavity(override) {
     params: { nu, rho: 1, divergenceTol: 1e-7 },
     timestep: { safety: DEFAULT_SAFETY },
     Re,
+    reference: { U, L: 1, speed: "lid speed", length: "cavity side" },
   };
 }
 
@@ -98,6 +99,7 @@ function cylinderInChannel(override) {
     params: { nu, rho: 1, divergenceTol: 1e-7 },
     timestep: { safety: DEFAULT_SAFETY },
     Re,
+    reference: { U, L: D, speed: "inlet speed", length: "cylinder diameter" },
   };
 }
 
@@ -136,6 +138,7 @@ function channelBend({ innerRadius, id, label, note, Re = 200 }, override) {
     params: { nu, rho: 1, divergenceTol: 1e-7 },
     timestep: { safety: DEFAULT_SAFETY },
     Re,
+    reference: { U, L: w, speed: "inlet speed", length: "duct width" },
   };
 }
 
@@ -174,6 +177,7 @@ function pressureChannel(override) {
     params: { nu, rho: 1, divergenceTol: 1e-7, poissonMaxIterations: 20000 },
     timestep: { safety: DEFAULT_SAFETY },
     Re: Math.round((U * w) / nu),
+    reference: { U, L: w, speed: "mean speed from the pressure drop", length: "channel width" },
   };
 }
 
@@ -213,6 +217,7 @@ function segmentedJet(override) {
     params: { nu, rho: 1, divergenceTol: 1e-7, poissonMaxIterations: 20000 },
     timestep: { safety: DEFAULT_SAFETY },
     Re: Math.round((((Q / (w / 3)) * w) / 3) / nu),
+    reference: { U: Q / (w / 3), L: w / 3, speed: "mean speed through the open inlet", length: "inlet width" },
   };
 }
 

@@ -17,6 +17,8 @@ import { sourcePlanFor } from "../sources/compile.js";
 import { probeCell, vorticityAtCell, vorticityAtNode } from "../physics/probe.js";
 import { isFluidAt, traceStep, velocityAt } from "../physics/velocityField.js";
 import { traceStreamlines } from "../physics/streamlines.js";
+import { qCriterionAt, rotationSummary } from "../physics/gradients.js";
+import { surfaceFaces, surfacePerimeter, wallShearSummary } from "../physics/wallShear.js";
 import { PathlineSet } from "../tracer/pathlines.js";
 import { sampleDocument } from "../geometry/document.js";
 import { bendDocument, cylinderDocument } from "../geometry/documents.js";
@@ -683,6 +685,119 @@ function measureFlowCurves() {
   ];
 }
 
+// The M9 derived quantities against closed-form results. Mirrors
+// tests/test18_m9_flow_analysis.js.
+function measureFlowAnalysis() {
+  const fillField = (grid, uAt, vAt) => {
+    const { nx, ny, h } = grid;
+    for (let j = 0; j <= ny + 1; j++) {
+      for (let i = 0; i <= nx + 1; i++) {
+        const k = grid.idx(i, j);
+        grid.u[k] = uAt(i * h, (j - 0.5) * h);
+        grid.v[k] = vAt((i - 0.5) * h, j * h);
+      }
+    }
+  };
+
+  // Wall shear against plane Poiseuille.
+  const sizes = [12, 24, 48];
+  const errors = [];
+  let lastMeasured = 0;
+  for (const cpw of sizes) {
+    const w = 1;
+    const L = 6;
+    const nu = 0.05;
+    const dp = 3.6;
+    const h = w / cpw;
+    const grid = new StaggeredGrid(Math.round(L / h), cpw, h);
+    const bc = {
+      left: { type: "pressure", p: dp }, right: { type: "pressure", p: 0 },
+      top: { type: "wall" }, bottom: { type: "wall" },
+    };
+    const params = { nu, rho: 1, divergenceTol: 1e-7, poissonMaxIterations: 20000 };
+    const dt = 0.3 * Math.min((0.25 * h * h) / nu, h / 3);
+    for (let n = 0; n < Math.round(30 / dt); n++) step(grid, bc, { ...params, dt });
+    const i = Math.round(grid.nx / 2);
+    let flux = 0;
+    for (let j = 1; j <= grid.ny; j++) flux += grid.u[grid.idx(i, j)] * h;
+    const plan = boundaryPlanFor(grid, bc);
+    lastMeasured = Math.abs(wallShearSummary(surfaceFaces(grid, { nu, rho: 1, plan })).peak);
+    errors.push(Math.abs(lastMeasured - (6 * nu * flux) / w) / ((6 * nu * flux) / w));
+  }
+  const order = Math.log2(errors[0] / errors[errors.length - 1]) /
+    Math.log2(sizes[sizes.length - 1] / sizes[0]);
+
+  // Q at its three exact values.
+  const W = 1.75;
+  const rotation = new StaggeredGrid(20, 20, 0.1);
+  fillField(rotation, (_x, y) => -W * y, (x) => W * x);
+  const rotationError = Math.abs(qCriterionAt(rotation, 10, 10) - W * W) / (W * W);
+
+  const S = 0.6;
+  const shear = new StaggeredGrid(20, 20, 0.1);
+  fillField(shear, (_x, y) => S * y, () => 0);
+  const shearQ = Math.abs(qCriterionAt(shear, 10, 10));
+
+  // A fully developed channel, which contains no vortex.
+  const cpw = 24;
+  const channel = new StaggeredGrid(Math.round(6 * cpw), cpw, 1 / cpw);
+  const channelBc = {
+    left: { type: "pressure", p: 3.6 }, right: { type: "pressure", p: 0 },
+    top: { type: "wall" }, bottom: { type: "wall" },
+  };
+  const channelParams = { nu: 0.05, rho: 1, divergenceTol: 1e-7, poissonMaxIterations: 20000 };
+  const channelDt = 0.3 * Math.min((0.25 / (cpw * cpw) / 0.05), 1 / cpw / 3);
+  for (let n = 0; n < Math.round(30 / channelDt); n++) {
+    step(channel, channelBc, { ...channelParams, dt: channelDt });
+  }
+  const summary = rotationSummary(channel);
+  const rotatingFraction = summary.rotating / summary.fluid;
+
+  // The staircase paradox, which is why integrated wall force is withheld.
+  const ratios = [];
+  for (const n of [16, 32, 64, 128]) {
+    const grid = new StaggeredGrid(n, n, 1 / n);
+    stampCircle(grid, 0.5, 0.5, 0.25);
+    const faces = surfaceFaces(grid, { nu: 0.01, rho: 1 });
+    ratios.push(surfacePerimeter(grid, faces) / (2 * Math.PI * 0.25));
+  }
+
+  return [
+    {
+      quantity: "wall shear vs plane Poiseuille, order of convergence",
+      measured: order,
+      context:
+        `relative error ${errors.map((e) => e.toExponential(2)).join(" -> ")} at ` +
+        `${sizes.join(", ")} cells across; the discrete stress itself reads ` +
+        `${lastMeasured.toFixed(6)} at every resolution, pinned by the streamwise force balance`,
+    },
+    {
+      quantity: "Q in solid-body rotation, relative error",
+      measured: rotationError,
+      context: `angular rate ${W}, so Q is exactly ${(W * W).toFixed(6)}`,
+    },
+    {
+      quantity: "Q in pure shear (analytically zero)",
+      measured: shearQ,
+      context: `shear rate ${S}: |Omega|^2 and |S|^2 are equal, so Q cancels exactly`,
+    },
+    {
+      quantity: "fluid reported as rotating in a pure shear channel",
+      measured: rotatingFraction,
+      context:
+        `${summary.rotating} of ${summary.fluid} cells, at a rotation-over-strain margin of ` +
+        `${(summary.margin * 100).toFixed(0)}%; a bare Q > 0 test reports about half`,
+    },
+    {
+      quantity: "staircase perimeter of a circle, ratio to the true perimeter",
+      measured: ratios[ratios.length - 1],
+      context:
+        `${ratios.map((r) => r.toFixed(4)).join(", ")} at n = 16, 32, 64, 128 - constant, ` +
+        `so refining the grid does not reduce it`,
+    },
+  ];
+}
+
 const MEASURERS = {
   "still-water": measureStillWater,
   "uniform-channel": measureUniformChannel,
@@ -695,6 +810,7 @@ const MEASURERS = {
   "interior-sources": measureInteriorSources,
   "probe-quantities": measureProbeQuantities,
   "flow-curves": measureFlowCurves,
+  "flow-analysis": measureFlowAnalysis,
 };
 
 export async function measureCase(caseId) {

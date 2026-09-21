@@ -245,6 +245,11 @@ export function readState(page) {
         srccount: text("#srccount"), srcbrush: text("#srcbrush"),
         probehover: text("#probehover"), probeaxis: text("#probeaxis"),
         pdatum: text("#pdatum"), overlaynote: text("#overlaynote"),
+        fa: {
+          declared: text("#fadeclared"), peak: text("#fapeak"),
+          shear: text("#fashear"), wall: text("#fawall"), sep: text("#fasep"),
+          rot: text("#farot"), dp: text("#fadp"), probedp: text("#faprobedp"),
+        },
         viewnote: text("#viewnote"),
         legend: [text("#legendmin"), text("#legendmid"), text("#legendmax")],
         banner: document.querySelector("#banner").hidden ? null : text("#banner"),
@@ -267,6 +272,16 @@ export function readState(page) {
         // be equal, and that equality is the only way to see from outside that
         // sampling happens per solver step rather than per repaint.
         mode: h.mode,
+        analysis: h.lastAnalysis === undefined || h.lastAnalysis === null ? null : {
+          declaredRe: h.lastAnalysis.declaredRe,
+          peakRe: h.lastAnalysis.peakRe,
+          separations: h.lastAnalysis.separations.length,
+          wallFaces: h.lastAnalysis.wall.counted,
+          integrable: h.lastAnalysis.wall.integrable,
+          rotating: h.lastAnalysis.rotation.rotating,
+          fluid: h.lastAnalysis.rotation.fluid,
+        },
+        scenarioRe: h.scenario.Re,
         overlays: { ...h.overlays },
         overlayCounts: h.overlayCounts,
         parcels: h.session.pathlines.count,

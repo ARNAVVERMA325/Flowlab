@@ -4,7 +4,7 @@
 
 Every number below was measured by running the solver through the same harnesses the test suite uses (`validation/measure.js`), and compared against references declared in `validation/registry.js`. A hand-maintained validation record can drift from the code while still reading as authority, which is the one failure mode a document like this must not have.
 
-Generated 2026-09-21 07:30:37 UTC.
+Generated 2026-09-21 18:12:50 UTC.
 
 ## How to read this
 
@@ -41,6 +41,7 @@ The distinction carries real weight. A cavity agreeing with published measuremen
 | Interior sources | `self-validated` | invariants only | — |
 | Probe quantities | `benchmarked` | taylorGreenVorticity | `derived` |
 | Streamlines and pathlines | `benchmarked` | solidBodyRotation | `derived` |
+| Flow analysis quantities | `benchmarked` | planePoiseuille | `derived` |
 
 ## Still water
 
@@ -267,6 +268,30 @@ The M8 curve families, against a field whose exact trajectories are known. Three
 | pathline radius drift in the same field | 0 | 1.280e-8<br><sub>400 steps of dt = 2e-3 - the steady-flow case where a pathline is a streamline</sub> | 0.01 | pass |
 | streamline points outside the fluid, all scenarios | 0 | 0<br><sub>over 15475 traced points in 6 scenarios</sub> | 0 | pass |
 
+## Flow analysis quantities
+
+**Classification:** `benchmarked` — checked against a reference external to this project, so being wrong is detectable from outside
+
+**Asserted by:** `tests/test18_m9_flow_analysis.js`
+
+The M9 derived quantities, against closed-form results. WALL SHEAR is compared with the exact plane-Poiseuille value 6*mu*U/w and converges at second order; worth knowing what that measures, because the discrete wall stress comes out identical at every resolution - the streamwise force balance pins it, since the pressure drop has to be carried by the two walls - so what converges is the analytic value it is compared against, through the flow rate. The Q-CRITERION is checked at its three exact values: solid-body rotation at rate W gives W^2, planar strain at rate a gives -a^2, and pure shear gives exactly zero. That last one is the value that matters, because it is the boundary the recirculation count sits on: a bare Q > 0 test reported 49.2% of a fully developed Poiseuille channel - which contains no vortex at all - as rotating.
+
+**Reference:** Plane Poiseuille flow: for a channel of width w with mean velocity U, u(y) = 1.5*U*(1 - (2(y-yc)/w)^2) and dp/dx = -12*mu*U/w^2.
+
+**Verification:** reproducible from the equations
+
+> Standard closed-form result, reproducible from the equations.
+
+> ⚠️ **Caveat.** These validate the QUANTITIES, not the flow they are computed from. Two limits are structural. Against a wall the averaged off-diagonal gradients become one-sided and first order, as M7 records for vorticity - so the shear rate reported in the cell against a wall is a weaker estimate than the one in the interior. And integrated wall force is not offered at all: summing over surface faces sums the staircase perimeter, which is 4/pi times the true perimeter of a curved body at every resolution and does not converge, so a drag figure on the cylinder would be about 27% high with no amount of grid able to fix it. On an axis-aligned body the staircase perimeter is exact and integration would be legitimate; it is still withheld, because deciding which case a domain is in needs a classifier with a threshold in it.
+
+| quantity | reference | measured | tolerance | result |
+|---|---|---|---|---|
+| wall shear vs plane Poiseuille, order of convergence | 2 | 1.99073<br><sub>relative error 1.37e-2 -> 3.46e-3 -> 8.67e-4 at 12, 24, 48 cells across; the discrete stress itself reads 0.300000 at every resolution, pinned by the streamwise force balance</sub> | 0.2 | pass |
+| Q in solid-body rotation, relative error | 0 | 1.015e-15<br><sub>angular rate 1.75, so Q is exactly 3.062500</sub> | 1.000e-12 | pass |
+| Q in pure shear (analytically zero) | 0 | 0<br><sub>shear rate 0.6: \|Omega\|^2 and \|S\|^2 are equal, so Q cancels exactly</sub> | 1.000e-14 | pass |
+| fluid reported as rotating in a pure shear channel | 0 | 0<br><sub>0 of 3456 cells, at a rotation-over-strain margin of 10%; a bare Q > 0 test reports about half</sub> | 0.01 | pass |
+| staircase perimeter of a circle, ratio to the true perimeter | 1.27324 | 1.27324<br><sub>1.2732, 1.2732, 1.2732, 1.2732 at n = 16, 32, 64, 128 - constant, so refining the grid does not reduce it</sub> | 1.000e-9 | pass |
+
 ## Known limitations
 
 Carried forward from `docs/M1-solver-hardening.md`, which has the detail:
@@ -289,6 +314,8 @@ From `docs/M5-interactive-geometry.md`: drawn shapes are SAMPLED onto the existi
 From `docs/M7-probes.md`: a probe reports a CELL, not an interpolated point - velocities averaged from that cell's own faces, vorticity from its four corners - so nothing it shows resolves finer than one cell. The vorticity it reports is second order in the interior and measured as such below; against a wall the corner values come from the surface faces, making that estimate one-sided and first order, and that is NOT measured. Pressure is reported with its datum named, because with nothing prescribing a pressure the field is only defined up to a constant and the solver fixes it by zero-meaning. The per-probe Reynolds number is the CELL Reynolds number |u|h/nu, which is a property of the mesh as much as of the flow and is smaller than the scenario's Reynolds number by a factor of 4 to 192 across these cases.
 
 From `docs/M8-visualization.md`: the streamline and pathline overlays are drawn from a BILINEAR interpolation of the velocity field, which is exact on a linear field and is deliberately not what a probe does - a trajectory passes between cell centres, a reading does not. Curves stop at the first solid cell, which bounds but does not eliminate their exposure to the reflected in-body face values the solver keeps for its no-slip stencil. Even spacing between streamlines is an occupancy-grid approximation of Jobard & Lefebvre (1997), not that algorithm. None of these curves validates the flow - a streamline is exactly as accurate as the field it is traced in. There is no density view because there is no density field: rho is a single uniform constant in this formulation.
+
+From `docs/M9-flow-analysis.md`: wall shear is computed PER FACE, where the normal is exact because every face of this grid is axis-aligned. The INTEGRATED force on a body is withheld entirely - summing over surface faces sums the staircase perimeter, which is 4/pi times the true perimeter of a curved body at every resolution and does not converge, so a drag figure on the cylinder would be about 27% high with no amount of grid able to fix it. Recirculation is counted where rotation exceeds strain by a stated margin rather than where Q > 0: pure shear puts Q analytically at zero, so a bare sign test reports about half of a Poiseuille channel as rotating. Against a wall the averaged off-diagonal gradients are one-sided and first order, as they are for vorticity.
 
 **1 reference is still unverified** (cylinderWakeLength). Any claim resting on it is weaker than the rest of this document, and should be read that way. Each one records what closing it would take, so it stays a piece of open work rather than a permanent disclaimer:
 

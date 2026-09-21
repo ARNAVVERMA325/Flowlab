@@ -56,6 +56,7 @@ import {
   arrowStride, drawPolylines, drawVectors, sampleVectors,
 } from "../visualization/flowOverlay.js";
 import { traceStreamlines } from "../physics/streamlines.js";
+import { analyseFlow, pressureDropBetween } from "../physics/flowAnalysis.js";
 import { drawSeries } from "../visualization/timeseries.js";
 import { describeSource } from "../sources/kinds.js";
 import {
@@ -884,6 +885,7 @@ export class Harness {
     this.updateTracerReadouts();
     this.updateSourcePanel();
     this.updateProbePanel();
+    this.updateAnalysisPanel();
     this.updateBoundaryPanel();
     this.updateGeometryPanel();
     this.updateLegend(view);
@@ -1184,6 +1186,114 @@ export class Harness {
     node.textContent = parts.length === 0
       ? "none - streamlines are tangent to the field now, pathlines are where parcels have been"
       : parts.join("  -  ");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Flow analysis
+  // ---------------------------------------------------------------------------
+
+  // Everything here is computed by physics/flowAnalysis.js from the grid, the
+  // compiled boundary plan the solver is running, and the scenario's declared
+  // reference scale. The harness formats and adds nothing - which is what lets
+  // node test the decisions about what is reported and what is withheld.
+  updateAnalysisPanel() {
+    const { root, scenario } = this;
+    const set = (id, text, bad = false) => {
+      const node = root.querySelector(id);
+      node.textContent = text;
+      node.classList.toggle("bad", bad);
+    };
+
+    const analysis = analyseFlow(scenario.grid, {
+      nu: scenario.params.nu,
+      rho: scenario.params.rho,
+      plan: this.plan,
+      reference: scenario.reference ?? null,
+      Re: scenario.Re ?? null,
+    });
+    this.lastAnalysis = analysis;
+
+    const reference = analysis.reference;
+    set(
+      "#fadeclared",
+      reference === null
+        ? integer(analysis.declaredRe)
+        : `${integer(analysis.declaredRe)}  (${reference.speed} ${fixed(reference.U, 3)} ` +
+          `x ${reference.length} ${fixed(reference.L, 3)})`
+    );
+    set(
+      "#fapeak",
+      Number.isFinite(analysis.peakRe)
+        ? `${integer(analysis.peakRe)}  (|u| ${exponential(analysis.peakSpeed, 3)}, same length)`
+        : "-",
+      !analysis.speedIsUsable
+    );
+
+    const shear = analysis.shear;
+    set(
+      "#fashear",
+      Number.isFinite(shear.peak)
+        ? `${exponential(shear.peak, 3)}${shear.peakAt ? ` at cell ${shear.peakAt.i},${shear.peakAt.j}` : ""}`
+        : "NaN",
+      !Number.isFinite(shear.peak)
+    );
+
+    const wall = analysis.wall;
+    set(
+      "#fawall",
+      wall.counted === 0
+        ? "no no-slip wall in this domain"
+        : `${exponential(Math.abs(wall.peak), 3)} over ${integer(wall.counted)} faces ` +
+          `(${fixed(wall.perimeter, 2)} of wall; total force withheld)`,
+      wall.nonFinite > 0
+    );
+
+    set(
+      "#fasep",
+      analysis.separations.length === 0
+        ? "none"
+        : `${integer(analysis.separations.length)} - ` +
+          analysis.separations.slice(0, 3)
+            .map((point) => `(${fixed(point.x, 2)}, ${fixed(point.y, 2)})`).join(" ") +
+          (analysis.separations.length > 3 ? " ..." : "")
+    );
+
+    const rotation = analysis.rotation;
+    set(
+      "#farot",
+      rotation.fluid === 0
+        ? "-"
+        : `${fixed((rotation.rotating / rotation.fluid) * 100, 1)}% rotating, ` +
+          `${fixed((rotation.straining / rotation.fluid) * 100, 1)}% straining, ` +
+          `${fixed((rotation.balanced / rotation.fluid) * 100, 1)}% balanced ` +
+          `(margin ${fixed(rotation.margin * 100, 0)}%)`
+    );
+
+    set(
+      "#fadp",
+      analysis.pressure.usable
+        ? `${exponential(analysis.pressure.range, 3)}  ` +
+          `(${exponential(analysis.pressure.min, 2)} to ${exponential(analysis.pressure.max, 2)})`
+        : "NaN",
+      !analysis.pressure.usable
+    );
+
+    // A pressure DIFFERENCE between two pinned probes: the one form of
+    // pressure reading that means the same thing under every boundary
+    // condition, which is why it is offered rather than an absolute value.
+    const probes = this.session.probes.probes;
+    if (probes.length < 2) {
+      set("#faprobedp", "pin two probes to measure one");
+    } else {
+      const measured = pressureDropBetween(scenario.grid, probes[0], probes[1]);
+      set(
+        "#faprobedp",
+        measured === null
+          ? `${probes[0].label} or ${probes[1].label} is not in fluid`
+          : `${probes[1].label} - ${probes[0].label} = ${exponential(measured.drop, 3)} ` +
+            `over ${fixed(measured.distance, 2)}`
+      );
+    }
   }
 
   // ---------------------------------------------------------------------------

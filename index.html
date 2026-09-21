@@ -277,6 +277,34 @@
       </div>
 
       <div class="panel">
+        <h2>Flow analysis</h2>
+        <dl>
+          <dt>Reynolds (declared)</dt><dd id="fadeclared">-</dd>
+          <dt>Reynolds (peak speed)</dt><dd id="fapeak">-</dd>
+          <dt>peak shear rate</dt><dd id="fashear">-</dd>
+          <dt>peak wall shear</dt><dd id="fawall">-</dd>
+          <dt>separation points</dt><dd id="fasep">-</dd>
+          <dt>rotation vs strain</dt><dd id="farot">-</dd>
+          <dt>pressure range</dt><dd id="fadp">-</dd>
+          <dt>probe &Delta;p</dt><dd id="faprobedp">-</dd>
+        </dl>
+        <p class="vnote">The declared Reynolds number is an <em>input</em>: each
+        scenario picks it along with a reference speed and length and derives
+        &nu; from them, and a test asserts the three stay consistent. The peak
+        figure uses the same length with the fastest fluid actually present, so
+        it says how far the flow locally exceeds its nominal regime. Shear rate
+        is du/dy + dv/dx &mdash; vorticity is the same two derivatives
+        <em>subtracted</em>, so a shear layer is large in both and solid-body
+        rotation is large in one only. Wall shear is computed per face, where
+        the normal is exact; the <em>total</em> force on a body is withheld,
+        because summing over surface faces sums the staircase perimeter, which
+        is 4/&pi; times the true perimeter of a curved body at every resolution
+        and does not converge. Rotation is counted where it exceeds strain by a
+        stated margin rather than where Q &gt; 0, which is a coin flip in a
+        shear flow.</p>
+      </div>
+
+      <div class="panel">
         <h2>Probes</h2>
         <p class="drawstatus" id="probehover">-</p>
         <div id="probelist"></div>

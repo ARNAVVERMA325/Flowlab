@@ -15,6 +15,7 @@
 
 import { deviationPercentile, inspectScalar, speedAtCell } from "../physics/fieldStats.js";
 import { vorticityAtCell } from "../physics/probe.js";
+import { qCriterionAt, shearRateAt } from "../physics/gradients.js";
 import { continuityErrorAt } from "../solver/ns2d.js";
 
 // The pressure scale is fitted to this fraction of the cells rather than to the
@@ -165,39 +166,11 @@ const VORTICITY = {
     "fluid reads as the centre colour and the sign carries the direction of " +
     "rotation.",
   prepare(context) {
-    const { grid } = context;
-    const valueAt = (i, j) => vorticityAtCell(grid, i, j);
-    const summary = inspectScalar(grid, valueAt);
     // Centred on ZERO rather than on the mean. That is the one difference from
     // the pressure view and it is not cosmetic: pressure's datum is arbitrary,
     // so its picture must be relative to something, while vorticity has a
     // physical zero and shifting it would paint still fluid as rotating.
-    const percentile = summary.finite
-      ? deviationPercentile(grid, valueAt, 0, VORTICITY_CLIP)
-      : null;
-    const extreme = summary.finite
-      ? Math.max(Math.abs(summary.max), Math.abs(summary.min))
-      : NaN;
-    const fitted = percentile !== null && percentile.threshold > 0
-      ? percentile.threshold
-      : extreme > 0 ? extreme : 1;
-    const amplitude = summary.finite ? fitted : NaN;
-    return {
-      valueAt,
-      summary,
-      scale: {
-        lo: -amplitude, hi: amplitude, centre: 0, diverging: true,
-        clipped: percentile === null || percentile.beyond === 0 ? null : {
-          cells: percentile.beyond,
-          of: percentile.cells,
-          trueLo: summary.min,
-          trueHi: summary.max,
-        },
-      },
-      normalise: (value) =>
-        Math.min(1, Math.max(0, 0.5 + (0.5 * value) / amplitude)),
-      ramp: sampleDiverging,
-    };
+    return signedView(context.grid, (i, j) => vorticityAtCell(context.grid, i, j));
   },
 };
 
@@ -310,6 +283,93 @@ function countBeyond(grid, valueAt, bound) {
   return { cells, of, worst };
 }
 
+// Shear rate and the Q-criterion are the two halves of the same decomposition,
+// so they share vorticity's treatment exactly: signed, centred on a physical
+// zero, clipped at p99 with the clipping reported.
+//
+// They are separate views rather than one because they answer opposite
+// questions about the same two derivative terms. Shear rate is du/dy + dv/dx;
+// vorticity is the same two terms SUBTRACTED. A uniform shear layer has large
+// shear and no rotation; solid-body rotation has large rotation and no shear.
+// Showing one under the other's name would make a shear layer look like a
+// vortex, which is the distinction a viewer is most often trying to make.
+const SHEAR = {
+  id: "shear",
+  label: "shear rate",
+  requires: "grid",
+  note:
+    "The engineering shear rate du/dy + dv/dx at cell centres - the " +
+    "off-diagonal of the strain-rate tensor, doubled. NOT vorticity, which is " +
+    "the same two derivatives subtracted rather than added: a uniform shear " +
+    "layer reads large here and large in vorticity, while solid-body rotation " +
+    "reads zero here and large there. Centred on zero, which is the physical " +
+    "datum; the sign says which way the layer is being sheared.",
+  prepare(context) {
+    return signedView(context.grid, (i, j) => shearRateAt(context.grid, i, j));
+  },
+};
+
+const QCRITERION = {
+  id: "q",
+  label: "rotation vs strain (root Q)",
+  requires: "grid",
+  note:
+    "The Q-criterion, half the difference between the squared magnitudes of " +
+    "the rotation-rate and strain-rate tensors (Hunt, Wray & Moin 1988). " +
+    "Positive where rotation dominates - a vortex core; negative where strain " +
+    "dominates - a shear layer or a stagnation region; and exactly ZERO in " +
+    "pure shear, where the two balance. Chosen over any 'the velocity is " +
+    "negative' test because that needs a direction to be negative relative to, " +
+    "and every choice of one is a property of the domain rather than of the " +
+    "flow. Q needs nothing but the field. " +
+    "PLOTTED as sign(Q)*sqrt(|Q|), and the legend numbers are that: Q is " +
+    "quadratic in the velocity gradients, so its raw range spans orders of " +
+    "magnitude and a linear scale leaves everything but the strongest core at " +
+    "the centre colour. The square root is not a cosmetic squash - it returns " +
+    "the quantity to units of 1/time, the same units as vorticity and shear " +
+    "rate beside it, which is what makes the three legends comparable.",
+  prepare(context) {
+    // Signed root, so the sign - which is the whole content of the criterion -
+    // survives the transform.
+    return signedView(context.grid, (i, j) => {
+      const q = qCriterionAt(context.grid, i, j);
+      return Math.sign(q) * Math.sqrt(Math.abs(q));
+    });
+  },
+};
+
+// The shared body of the signed, zero-centred, percentile-clipped views. One
+// implementation so vorticity, shear and Q cannot drift apart in how they
+// scale, which they would if each carried its own copy.
+function signedView(grid, valueAt) {
+  const summary = inspectScalar(grid, valueAt);
+  const percentile = summary.finite
+    ? deviationPercentile(grid, valueAt, 0, VORTICITY_CLIP)
+    : null;
+  const extreme = summary.finite
+    ? Math.max(Math.abs(summary.max), Math.abs(summary.min))
+    : NaN;
+  const fitted = percentile !== null && percentile.threshold > 0
+    ? percentile.threshold
+    : extreme > 0 ? extreme : 1;
+  const amplitude = summary.finite ? fitted : NaN;
+  return {
+    valueAt,
+    summary,
+    scale: {
+      lo: -amplitude, hi: amplitude, centre: 0, diverging: true,
+      clipped: percentile === null || percentile.beyond === 0 ? null : {
+        cells: percentile.beyond,
+        of: percentile.cells,
+        trueLo: summary.min,
+        trueHi: summary.max,
+      },
+    },
+    normalise: (value) => Math.min(1, Math.max(0, 0.5 + (0.5 * value) / amplitude)),
+    ramp: sampleDiverging,
+  };
+}
+
 const DYE = {
   id: "dye",
   label: "dye (visualization aid)",
@@ -338,7 +398,7 @@ const DYE = {
   },
 };
 
-export const FIELD_SOURCES = [VELOCITY, PRESSURE, VORTICITY, CONTINUITY, DYE];
+export const FIELD_SOURCES = [VELOCITY, PRESSURE, VORTICITY, SHEAR, QCRITERION, CONTINUITY, DYE];
 export const DEFAULT_FIELD_SOURCE = "velocity";
 
 export function fieldSourceById(id) {

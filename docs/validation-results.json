@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-21 07:30:37 UTC",
+  "generatedAt": "2026-09-21 18:12:50 UTC",
   "cases": {
     "still-water": {
       "label": "Still water",
@@ -520,6 +520,64 @@
           "tolerance": 0,
           "relative": false,
           "referenceType": "invariant",
+          "result": "pass"
+        }
+      ]
+    },
+    "flow-analysis": {
+      "label": "Flow analysis quantities",
+      "classification": "benchmarked",
+      "reference": {
+        "id": "planePoiseuille",
+        "citation": "Plane Poiseuille flow: for a channel of width w with mean velocity U, u(y) = 1.5*U*(1 - (2(y-yc)/w)^2) and dp/dx = -12*mu*U/w^2.",
+        "verification": "derived"
+      },
+      "caveat": "These validate the QUANTITIES, not the flow they are computed from. Two limits are structural. Against a wall the averaged off-diagonal gradients become one-sided and first order, as M7 records for vorticity - so the shear rate reported in the cell against a wall is a weaker estimate than the one in the interior. And integrated wall force is not offered at all: summing over surface faces sums the staircase perimeter, which is 4/pi times the true perimeter of a curved body at every resolution and does not converge, so a drag figure on the cylinder would be about 27% high with no amount of grid able to fix it. On an axis-aligned body the staircase perimeter is exact and integration would be legitimate; it is still withheld, because deciding which case a domain is in needs a classifier with a threshold in it.",
+      "measuredBy": "tests/test18_m9_flow_analysis.js",
+      "claims": [
+        {
+          "quantity": "wall shear vs plane Poiseuille, order of convergence",
+          "reference": 2,
+          "measured": 1.9907289482607915,
+          "tolerance": 0.2,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "Q in solid-body rotation, relative error",
+          "reference": 0,
+          "measured": 1.0150610510858574e-15,
+          "tolerance": 1e-12,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "Q in pure shear (analytically zero)",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 1e-14,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "fluid reported as rotating in a pure shear channel",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 0.01,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "staircase perimeter of a circle, ratio to the true perimeter",
+          "reference": 1.2732395447351628,
+          "measured": 1.2732395447351628,
+          "tolerance": 1e-9,
+          "relative": false,
+          "referenceType": "analytical",
           "result": "pass"
         }
       ]

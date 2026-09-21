@@ -477,6 +477,46 @@ export const CASES = [
       { quantity: "streamline points outside the fluid, all scenarios", reference: 0, tolerance: 0, referenceType: "invariant" },
     ],
   },
+  {
+    id: "flow-analysis",
+    label: "Flow analysis quantities",
+    classification: "benchmarked",
+    measuredBy: "tests/test18_m9_flow_analysis.js",
+    reference: "planePoiseuille",
+    rationale:
+      "The M9 derived quantities, against closed-form results. WALL SHEAR is " +
+      "compared with the exact plane-Poiseuille value 6*mu*U/w and converges " +
+      "at second order; worth knowing what that measures, because the discrete " +
+      "wall stress comes out identical at every resolution - the streamwise " +
+      "force balance pins it, since the pressure drop has to be carried by the " +
+      "two walls - so what converges is the analytic value it is compared " +
+      "against, through the flow rate. The Q-CRITERION is checked at its three " +
+      "exact values: solid-body rotation at rate W gives W^2, planar strain at " +
+      "rate a gives -a^2, and pure shear gives exactly zero. That last one is " +
+      "the value that matters, because it is the boundary the recirculation " +
+      "count sits on: a bare Q > 0 test reported 49.2% of a fully developed " +
+      "Poiseuille channel - which contains no vortex at all - as rotating.",
+    caveat:
+      "These validate the QUANTITIES, not the flow they are computed from. " +
+      "Two limits are structural. Against a wall the averaged off-diagonal " +
+      "gradients become one-sided and first order, as M7 records for vorticity " +
+      "- so the shear rate reported in the cell against a wall is a weaker " +
+      "estimate than the one in the interior. And integrated wall force is not " +
+      "offered at all: summing over surface faces sums the staircase " +
+      "perimeter, which is 4/pi times the true perimeter of a curved body at " +
+      "every resolution and does not converge, so a drag figure on the " +
+      "cylinder would be about 27% high with no amount of grid able to fix it. " +
+      "On an axis-aligned body the staircase perimeter is exact and " +
+      "integration would be legitimate; it is still withheld, because deciding " +
+      "which case a domain is in needs a classifier with a threshold in it.",
+    claims: [
+      { quantity: "wall shear vs plane Poiseuille, order of convergence", reference: 2, tolerance: 0.2, referenceType: "analytical" },
+      { quantity: "Q in solid-body rotation, relative error", reference: 0, tolerance: 1e-12, referenceType: "analytical" },
+      { quantity: "Q in pure shear (analytically zero)", reference: 0, tolerance: 1e-14, referenceType: "analytical" },
+      { quantity: "fluid reported as rotating in a pure shear channel", reference: 0, tolerance: 0.01, referenceType: "invariant" },
+      { quantity: "staircase perimeter of a circle, ratio to the true perimeter", reference: 1.2732395447351628, tolerance: 1e-9, referenceType: "analytical" },
+    ],
+  },
 ];
 
 // Harness scenarios map onto cases. A scenario the panel can show but that no

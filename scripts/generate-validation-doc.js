@@ -309,6 +309,20 @@ async function main() {
     "density field: rho is a single uniform constant in this formulation."
   );
   lines.push("");
+  lines.push(
+    "From `docs/M9-flow-analysis.md`: wall shear is computed PER FACE, where " +
+    "the normal is exact because every face of this grid is axis-aligned. The " +
+    "INTEGRATED force on a body is withheld entirely - summing over surface " +
+    "faces sums the staircase perimeter, which is 4/pi times the true " +
+    "perimeter of a curved body at every resolution and does not converge, so " +
+    "a drag figure on the cylinder would be about 27% high with no amount of " +
+    "grid able to fix it. Recirculation is counted where rotation exceeds " +
+    "strain by a stated margin rather than where Q > 0: pure shear puts Q " +
+    "analytically at zero, so a bare sign test reports about half of a " +
+    "Poiseuille channel as rotating. Against a wall the averaged off-diagonal " +
+    "gradients are one-sided and first order, as they are for vorticity."
+  );
+  lines.push("");
   const unverified = Object.values(REFERENCES).filter((r) => r.verification === "unverified");
   if (unverified.length) {
     lines.push(
