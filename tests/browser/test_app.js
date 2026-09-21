@@ -643,6 +643,243 @@ describe("browser", { skip }, () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // M7: probes
+  // -------------------------------------------------------------------------
+
+  test("a pinned probe samples once per solver step, not once per repaint", async () => {
+    // The check the design turns on. The harness runs up to four solver steps
+    // per animation frame, so a probe sampled in draw() would keep one reading
+    // in four - invisible on a smooth signal, aliasing on anything varying near
+    // the step rate. Equality with the iteration count is the only way to see
+    // that from outside, and it is only observable in a browser because nothing
+    // else runs the animation loop.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      await page.click('button.tool[data-tool="probe"]');
+      const [x, y] = await clientFor(page, 0.5, 0.5);
+      await page.mouse.click(x, y);
+      await page.waitForTimeout(200);
+
+      const pinned = await readState(page);
+      assert.equal(pinned.solver.probeCount, 1);
+      assert.equal(pinned.solver.probeSamples, 0, "pinning is not a measurement");
+      assert.match(pinned.panel.probeaxis, /no samples yet/);
+
+      await page.click("#run");
+      await page.waitForTimeout(2000);
+      await page.click("#pause");
+
+      const ran = await readState(page);
+      assert.ok(ran.solver.iteration > 50, `only ${ran.solver.iteration} steps ran`);
+      assert.equal(
+        ran.solver.probeSamples, ran.solver.iteration,
+        "one sample per solver step - a sample taken on repaint would be about a quarter of these"
+      );
+      assert.match(ran.panel.probeaxis, /P1 \|u\|/);
+      assert.match(ran.panel.probeaxis, /samples/);
+      assert.doesNotMatch(ran.panel.probeaxis, /NOT FINITE/);
+    });
+  });
+
+  test("the hover readout reads the cell under the pointer, and keeps reading it", async () => {
+    // Two things. The readout must follow the pointer, and it must stay LIVE
+    // while the run advances without the pointer moving - which is why the
+    // harness remembers the point rather than the sample. Storing the sample
+    // would freeze the numbers at the last pointer move and show a stale
+    // measurement under a live cursor.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+
+      const h = await page.evaluate(() => window.__flowlab.scenario.grid.h);
+      // The readout names the CELL, so the position it prints is that cell's
+      // centre rather than the pointer's own - which is the design, and the
+      // reason this asserts "within half a cell" instead of equality.
+      const at = (text) => {
+        const matched = text.match(/^\(([-\d.]+), ([-\d.]+)\) cell (\d+),(\d+)/);
+        assert.ok(matched, `hover reads "${text}", which names no cell`);
+        return { x: Number(matched[1]), y: Number(matched[2]), cell: `${matched[3]},${matched[4]}` };
+      };
+      // Half a cell, plus the two decimal places the readout is rounded to.
+      const near = h / 2 + 0.005;
+
+      const [x0, y0] = await clientFor(page, 0.25, 0.75);
+      await page.mouse.move(x0, y0);
+      await page.waitForTimeout(150);
+      const first = (await readState(page)).panel.probehover;
+      const firstAt = at(first);
+      assert.ok(Math.abs(firstAt.x - 0.25) <= near, `x reads ${firstAt.x} for a point at 0.25`);
+      assert.ok(Math.abs(firstAt.y - 0.75) <= near, `y reads ${firstAt.y} for a point at 0.75`);
+      assert.match(first, /cell Re/);
+
+      const [x1, y1] = await clientFor(page, 0.75, 0.25);
+      await page.mouse.move(x1, y1);
+      await page.waitForTimeout(150);
+      const second = (await readState(page)).panel.probehover;
+      const secondAt = at(second);
+      assert.ok(Math.abs(secondAt.x - 0.75) <= near, `x reads ${secondAt.x} for a point at 0.75`);
+      assert.ok(Math.abs(secondAt.y - 0.25) <= near);
+      assert.notEqual(secondAt.cell, firstAt.cell, "the readout must follow the pointer");
+
+      // Now run WITHOUT moving the pointer. The cell is the same; the numbers
+      // in it are not.
+      //
+      // Started by dispatching the button's own click rather than by clicking
+      // it, because moving the mouse to the button leaves the canvas - which
+      // correctly clears the readout, and would make this check about
+      // pointerleave instead of about staleness.
+      await page.evaluate(() => document.querySelector("#run").click());
+      await page.waitForTimeout(1500);
+      const live = (await readState(page)).panel.probehover;
+      assert.equal(at(live).cell, secondAt.cell, "still the same cell");
+      assert.notEqual(
+        live, second,
+        "the readout must re-read the field, not replay the sample taken when the pointer moved"
+      );
+
+      // And leaving the canvas clears it rather than leaving a number behind.
+      await page.mouse.move(5, 5);
+      await page.waitForTimeout(200);
+      assert.match((await readState(page)).panel.probehover, /hover the field/);
+    });
+  });
+
+  test("the probe and quantity selectors change the plot and not the simulation", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      await page.click('button.tool[data-tool="probe"]');
+      for (const [px, py] of [[0.3, 0.8], [0.7, 0.2]]) {
+        const [cx, cy] = await clientFor(page, px, py);
+        await page.mouse.click(cx, cy);
+        await page.waitForTimeout(150);
+      }
+      await page.click("#run");
+      await page.waitForTimeout(1800);
+      await page.click("#pause");
+
+      const two = await readState(page);
+      assert.equal(two.solver.probeCount, 2);
+      assert.equal(two.solver.probeSelection, 2, "the newest probe is the one plotted");
+
+      // A checksum of the chart, so "the selector did something" is measured
+      // rather than assumed from the select's value.
+      const chart = () => page.evaluate(() => {
+        const c = document.querySelector("#probechart");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 97) sum = (sum * 31 + d[i]) >>> 0;
+        return sum;
+      });
+
+      const p2 = await chart();
+      await page.selectOption("#probepick", "1");
+      await page.waitForTimeout(200);
+      const onP1 = await readState(page);
+      assert.equal(onP1.solver.probeSelection, 1);
+      assert.notEqual(await chart(), p2, "switching probe must change the plot");
+      assert.match(onP1.panel.probeaxis, /^P1 /);
+
+      // The quantities come from the module that defines them, so the two
+      // cannot drift - the same rule the view-mode check follows.
+      const quantities = await page.evaluate(() =>
+        [...document.querySelectorAll("#probequantity option")].map((o) => o.value));
+      assert.deepEqual(quantities, ["speed", "u", "v", "pressure", "vorticity", "cellRe"]);
+
+      const before = onP1.solver.iteration;
+      for (const quantity of quantities) {
+        await page.selectOption("#probequantity", quantity);
+        await page.waitForTimeout(120);
+        const state = await readState(page);
+        assert.equal(state.solver.iteration, before, `plotting ${quantity} stepped the simulation`);
+        assert.equal(state.solver.probeSamples, onP1.solver.probeSamples,
+          `plotting ${quantity} changed the history`);
+      }
+      // Pressure is the one quantity whose number is meaningless without its
+      // datum, so the plot says which it is.
+      await page.selectOption("#probequantity", "pressure");
+      await page.waitForTimeout(150);
+      const onPressure = await readState(page);
+      assert.match(onPressure.panel.probeaxis, /datum/);
+      assert.match(onPressure.panel.pdatum, /gauge/, "the cavity prescribes no pressure anywhere");
+    });
+  });
+
+  test("a probe in a wall says solid, and clear removes every probe", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(200);
+      assert.equal(
+        await page.evaluate(() => document.querySelector("#clearprobes").disabled), true,
+        "nothing to clear before anything is pinned"
+      );
+      // A pressure boundary sets the datum here, so the panel must not call it
+      // a gauge.
+      await page.selectOption("#scenario", "pressure-channel");
+      await page.waitForTimeout(250);
+      assert.match((await readState(page)).panel.pdatum, /absolute/);
+
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(250);
+      await page.click('button.tool[data-tool="probe"]');
+      const [wx, wy] = await clientFor(page, 3.5, 73 / 24);  // the cylinder body
+      await page.mouse.click(wx, wy);
+      const [fx, fy] = await clientFor(page, 8.0, 2.0);      // open channel
+      await page.mouse.click(fx, fy);
+      await page.waitForTimeout(250);
+
+      const pinned = await readState(page);
+      assert.equal(pinned.solver.probeCount, 2, "a probe inside a body is legitimate");
+      const rows = await page.evaluate(() =>
+        [...document.querySelectorAll("#probelist .probrow")].map((r) => r.textContent));
+      assert.equal(rows.length, 2);
+      assert.match(rows[0], /solid - no fluid here/, "P1 is inside the cylinder");
+      assert.doesNotMatch(rows[0], /NaN/, "and says so in words rather than printing NaNs");
+      assert.match(rows[1], /cell Re/, "P2 is in the fluid and reports numbers");
+
+      await page.click("#run");
+      await page.waitForTimeout(1200);
+      await page.click("#pause");
+      const ran = await readState(page);
+      assert.ok(ran.solver.iteration > 0);
+
+      // The chart for a probe inside a wall. It HAS samples - one per step, all
+      // NaN, which is the correct reading there - so the note must say that
+      // rather than "no samples yet - press Run", which is what it said until
+      // the app was run by hand and the message read. "Nothing recorded" and
+      // "everything recorded is NaN" are different states and this is the only
+      // check that can tell them apart.
+      await page.selectOption("#probepick", "1");
+      await page.waitForTimeout(200);
+      const onSolid = await readState(page);
+      assert.match(onSolid.panel.probeaxis, /samples, all inside a wall/);
+      assert.doesNotMatch(
+        onSolid.panel.probeaxis, /no samples yet/,
+        "the run already happened; telling anyone to press Run describes a state the app is not in"
+      );
+      assert.doesNotMatch(onSolid.panel.probeaxis, /NONE FINITE/,
+        "a solid cell is the ordinary correct answer, not a failure");
+      // And the fluid probe beside it plots normally.
+      await page.selectOption("#probepick", "2");
+      await page.waitForTimeout(200);
+      assert.match((await readState(page)).panel.probeaxis, /P2 \|u\|: .* samples/);
+
+      await page.click("#clearprobes");
+      await page.waitForTimeout(250);
+      const cleared = await readState(page);
+      assert.equal(cleared.solver.probeCount, 0);
+      assert.equal(cleared.solver.probeSelection, null);
+      assert.match(cleared.panel.probeaxis, /no probe pinned/);
+      assert.equal(
+        await page.evaluate(() => document.querySelector("#clearprobes").disabled), true
+      );
+      // Clearing a probe is not a simulation event: the run is where it was.
+      assert.ok(cleared.solver.iteration > 0, "clearing probes must not reset the run");
+    });
+  });
+
   test("switching the view does not touch the simulation", async () => {
     // M3's rule: changing what is displayed is a pure display change.
     await withApp(async ({ page }) => {

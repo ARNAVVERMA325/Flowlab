@@ -14,6 +14,7 @@ import {
   step, computeDivergence, computeContinuityError, boundaryPlanFor,
 } from "../solver/ns2d.js";
 import { sourcePlanFor } from "../sources/compile.js";
+import { probeCell, vorticityAtCell, vorticityAtNode } from "../physics/probe.js";
 import { sampleDocument } from "../geometry/document.js";
 import { bendDocument, cylinderDocument } from "../geometry/documents.js";
 
@@ -469,6 +470,103 @@ function measureInteriorSources() {
   ];
 }
 
+// The probe sampler against a closed-form field. Mirrors
+// tests/test16_m7_probes.js - the test asserts the order, this records the
+// numbers behind it.
+function measureProbeQuantities() {
+  const fill = (grid, uAt, vAt) => {
+    const { nx, ny, h } = grid;
+    for (let j = 0; j <= ny + 1; j++) {
+      for (let i = 0; i <= nx + 1; i++) {
+        const k = grid.idx(i, j);
+        grid.u[k] = uAt(i * h, (j - 0.5) * h);
+        grid.v[k] = vAt((i - 0.5) * h, j * h);
+      }
+    }
+  };
+
+  // Taylor-Green: omega = 2 cos(x) cos(y).
+  const sizes = [16, 32, 64];
+  const node = [];
+  const centre = [];
+  for (const n of sizes) {
+    const h = (2 * Math.PI) / n;
+    const grid = new StaggeredGrid(n, n, h);
+    fill(grid, (x, y) => -Math.cos(x) * Math.sin(y), (x, y) => Math.sin(x) * Math.cos(y));
+    let worstNode = 0;
+    let worstCentre = 0;
+    for (let j = 1; j <= n; j++) {
+      for (let i = 1; i <= n; i++) {
+        worstNode = Math.max(worstNode, Math.abs(
+          vorticityAtNode(grid, i, j) - 2 * Math.cos(i * h) * Math.cos(j * h)
+        ));
+        const { x, y } = grid.cellCentre(i, j);
+        worstCentre = Math.max(worstCentre, Math.abs(
+          vorticityAtCell(grid, i, j) - 2 * Math.cos(x) * Math.cos(y)
+        ));
+      }
+    }
+    node.push(worstNode);
+    centre.push(worstCentre);
+  }
+  const order = (errors) => Math.log2(errors[0] / errors[errors.length - 1]) /
+    Math.log2(sizes[sizes.length - 1] / sizes[0]);
+
+  // Solid-body rotation, where the quotients are exact.
+  const w0 = 1.75;
+  const rotation = new StaggeredGrid(9, 7, 0.2);
+  fill(rotation, (_x, y) => -w0 * y, (x) => w0 * x);
+  let rotationError = 0;
+  for (let j = 1; j <= rotation.ny; j++) {
+    for (let i = 1; i <= rotation.nx; i++) {
+      rotationError = Math.max(rotationError, Math.abs(vorticityAtCell(rotation, i, j) - 2 * w0));
+    }
+  }
+
+  // A linear velocity field, where the face average equals the exact centre.
+  const linear = new StaggeredGrid(8, 8, 0.5);
+  fill(linear, (x) => 3 * x, (_x, y) => -2 * y);
+  let velocityError = 0;
+  for (let j = 1; j <= linear.ny; j++) {
+    for (let i = 1; i <= linear.nx; i++) {
+      const { x, y } = linear.cellCentre(i, j);
+      const sample = probeCell(linear, i, j, { nu: 1e-2 });
+      velocityError = Math.max(
+        velocityError,
+        Math.abs(sample.u - 3 * x),
+        Math.abs(sample.v - -2 * y)
+      );
+    }
+  }
+
+  const listed = (errors) => errors.map((e) => e.toExponential(2)).join(" -> ");
+  return [
+    {
+      quantity: "vorticity at a node, order of convergence (Taylor-Green)",
+      measured: order(node),
+      context: `max error ${listed(node)} at n = ${sizes.join(", ")}`,
+    },
+    {
+      quantity: "vorticity at a cell centre, order of convergence (Taylor-Green)",
+      measured: order(centre),
+      context:
+        `max error ${listed(centre)} at n = ${sizes.join(", ")} - ` +
+        `${(centre[centre.length - 1] / node[node.length - 1]).toFixed(1)}x the node error, ` +
+        `same order`,
+    },
+    {
+      quantity: "vorticity in solid-body rotation, exact",
+      measured: rotationError,
+      context: `angular rate ${w0}, so the answer is exactly ${2 * w0} everywhere`,
+    },
+    {
+      quantity: "velocity at a cell vs its own faces, linear field",
+      measured: velocityError,
+      context: "u = 3x, v = -2y, where the face average is the exact centre value",
+    },
+  ];
+}
+
 const MEASURERS = {
   "still-water": measureStillWater,
   "uniform-channel": measureUniformChannel,
@@ -479,6 +577,7 @@ const MEASURERS = {
   "pressure-driven-channel": measurePressureChannel,
   "drawn-geometry": measureDrawnGeometry,
   "interior-sources": measureInteriorSources,
+  "probe-quantities": measureProbeQuantities,
 };
 
 export async function measureCase(caseId) {

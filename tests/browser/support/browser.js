@@ -243,6 +243,8 @@ export function readState(page) {
         vclass: text("#vclass"), regions: text("#bcregions"),
         net: text("#bcnet"), drawstatus: text("#drawstatus"),
         srccount: text("#srccount"), srcbrush: text("#srcbrush"),
+        probehover: text("#probehover"), probeaxis: text("#probeaxis"),
+        pdatum: text("#pdatum"),
         banner: document.querySelector("#banner").hidden ? null : text("#banner"),
       },
       solver: {
@@ -256,6 +258,15 @@ export function readState(page) {
         bc: JSON.parse(JSON.stringify(h.session.bc)),
         maskVersion: g.maskVersion,
         operations: h.session.document.operations.length,
+        probeCount: h.session.probes.count,
+        probeSelection: h.probeSelection,
+        // The SELECTED probe's history length, which is what the chart is
+        // drawing. Read beside the iteration count deliberately: the two must
+        // be equal, and that equality is the only way to see from outside that
+        // sampling happens per solver step rather than per repaint.
+        probeSamples: h.probeSelection === null
+          ? null
+          : h.session.probes.probeById(h.probeSelection).history.length,
       },
     };
   });

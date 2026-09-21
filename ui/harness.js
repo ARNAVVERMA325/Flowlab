@@ -31,7 +31,8 @@
 // an edit those faces are somewhere else.
 
 import {
-  computeContinuityError, boundaryPlanFor, SolverDivergenceError, SolverGeometryError,
+  computeContinuityError, boundaryPlanFor, pressureIsGauge,
+  SolverDivergenceError, SolverGeometryError,
 } from "../solver/ns2d.js";
 import { sourcePlanFor } from "../sources/compile.js";
 import { SolverStabilityError } from "../solver/stability.js";
@@ -48,6 +49,10 @@ import { fieldsFor } from "../boundaries/editor.js";
 import { DRAW_TOOLS, DrawingController, describeOperation, regionTint } from "./drawing.js";
 import { clampToDomain, isInsideDomain, screenToPhysical } from "./canvasMapping.js";
 import { BRUSH_DEFAULTS, BrushController } from "./brush.js";
+import { PROBE_QUANTITIES } from "./probes.js";
+import { probeAt } from "../physics/probe.js";
+import { drawProbeMarkers } from "../visualization/probeOverlay.js";
+import { drawSeries } from "../visualization/timeseries.js";
 import { describeSource } from "../sources/kinds.js";
 import {
   prepareView,
@@ -61,6 +66,26 @@ import {
 } from "./fieldHealth.js";
 import { ValidationPanel } from "./validationPanel.js";
 import { exponential, fixed, integer, isBad } from "./format.js";
+
+// Where a sample was taken, and what it says. Split so the probe list can put
+// them on separate lines while the hover readout keeps them on one.
+function describePosition(sample) {
+  if (!sample.inside) return "outside the domain";
+  return `(${fixed(sample.x, 2)}, ${fixed(sample.y, 2)}) cell ${sample.i},${sample.j}`;
+}
+
+function describeValues(sample) {
+  if (!sample.inside) return "-";
+  // In words rather than as six NaNs. The numbers ARE NaN and format.js would
+  // faithfully print them, but NaN reads as a broken simulation and this is the
+  // ordinary, correct answer for a point inside a wall.
+  if (sample.solid) return "solid - no fluid here";
+  return (
+    `u ${exponential(sample.u, 2)}  v ${exponential(sample.v, 2)}  ` +
+    `|u| ${exponential(sample.speed, 2)}  p ${exponential(sample.pressure, 2)}  ` +
+    `\u03c9 ${exponential(sample.vorticity, 2)}  cell Re ${fixed(sample.cellRe, 2)}`
+  );
+}
 
 function escapeHtml(text) {
   return String(text).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -103,6 +128,11 @@ export class Harness {
     this.previewSummary = null;
     this.editMessage = null;
     this.showRegions = true;
+    // Probe display state. The probes themselves live in the session, which is
+    // what samples them; these three are only about what is being looked at.
+    this.hoverPoint = null;
+    this.probeSelection = null;
+    this.probeQuantity = "speed";
     this.drawing = new DrawingController({
       getLayout: () => this.layout(),
       onCommit: (operation) => this.commitEdit(() => this.session.applyEdit(operation)),
@@ -323,6 +353,11 @@ export class Harness {
     const canvas = root.querySelector("#field");
     canvas.addEventListener("pointerdown", (event) => {
       const tool = this.pointerTool;
+      if (tool === "probe") {
+        event.preventDefault();
+        this.pinProbeAt(event.clientX, event.clientY);
+        return;
+      }
       if (tool === "placeSource") {
         canvas.setPointerCapture(event.pointerId);
         event.preventDefault();
@@ -342,11 +377,22 @@ export class Harness {
       this.draw();
     });
     canvas.addEventListener("pointermove", (event) => {
+      // The hover readout is updated for EVERY tool and updates the panel
+      // text only - it never redraws the canvas. Reading a cell while drawing
+      // a wall through it is an obvious thing to want, and repainting the
+      // field on every pointer move to show a line of text would cost a frame
+      // for nothing.
+      this.readHover(event.clientX, event.clientY);
       if (this.pointerTool === "brush") {
         if (this.brush.move(event.clientX, event.clientY)) this.draw();
         return;
       }
       if (this.drawing.move(event.clientX, event.clientY)) this.draw();
+    });
+    canvas.addEventListener("pointerleave", () => {
+      if (this.hoverPoint === null) return;
+      this.hoverPoint = null;
+      this.updateProbeHover();
     });
     canvas.addEventListener("pointerup", (event) => {
       if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
@@ -386,6 +432,89 @@ export class Harness {
     root.querySelector("#clearsources").addEventListener("click", () => {
       if (this.session.clearSources()) this.draw();
     });
+
+    this.bindProbeControls();
+  }
+
+  bindProbeControls() {
+    const { root } = this;
+    const quantity = root.querySelector("#probequantity");
+    // Built from the table rather than listed in the markup, so a quantity
+    // added to ui/probes.js appears here without anyone editing index.html.
+    for (const [id, spec] of Object.entries(PROBE_QUANTITIES)) {
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = spec.label;
+      option.title = spec.description;
+      quantity.appendChild(option);
+    }
+    quantity.value = this.probeQuantity;
+    quantity.addEventListener("change", () => {
+      this.probeQuantity = quantity.value;
+      this.draw();
+    });
+
+    root.querySelector("#probepick").addEventListener("change", (event) => {
+      const id = Number(event.target.value);
+      this.probeSelection = Number.isFinite(id) && id > 0 ? id : null;
+      this.draw();
+    });
+
+    root.querySelector("#clearprobes").addEventListener("click", () => {
+      if (!this.session.clearProbes()) return;
+      this.probeSelection = null;
+      this.draw();
+    });
+  }
+
+  // Pins a probe where the pointer went down.
+  //
+  // Unlike a source, a probe is refused only for being outside the DOMAIN -
+  // a probe inside a wall is a legitimate thing to pin, and it says "solid"
+  // until the wall is erased.
+  pinProbeAt(clientX, clientY) {
+    const layout = this.layout();
+    const point = screenToPhysical(clientX, clientY, layout);
+    if (!isInsideDomain(point, layout, layout.h / 2)) return false;
+    const { x, y } = clampToDomain(point, layout);
+    let probe;
+    try {
+      probe = this.session.addProbe(x, y);
+    } catch (error) {
+      this.editMessage = `probe rejected: ${error.message}`;
+      this.draw();
+      return false;
+    }
+    // A newly pinned probe becomes the plotted one: it is the one just asked
+    // for, and leaving the chart on an older probe would make pinning look
+    // like it did nothing.
+    this.probeSelection = probe.id;
+    this.draw();
+    return true;
+  }
+
+  // Where the pointer is, for the hover readout.
+  //
+  // The POINT is remembered, not the sample. Storing the sample would freeze
+  // the reading at the instant the pointer last moved, and a running
+  // simulation would then show a stale measurement under a live cursor - the
+  // panel describing a field that has moved on, which is the one thing this
+  // harness is required not to do. Recomputed on every repaint instead, which
+  // costs one cell lookup.
+  //
+  // Nothing is recorded: a hover is not a measurement and must not enter a
+  // history the plot draws.
+  readHover(clientX, clientY) {
+    const layout = this.layout();
+    const point = screenToPhysical(clientX, clientY, layout);
+    if (!isInsideDomain(point, layout, layout.h / 2)) {
+      if (this.hoverPoint === null) return;
+      this.hoverPoint = null;
+      this.updateProbeHover();
+      return;
+    }
+    this.hoverPoint = clampToDomain(point, layout);
+    this.updateProbeHover();
   }
 
   // The numbers canvasMapping needs to turn a pointer position into a place in
@@ -494,6 +623,11 @@ export class Harness {
     this.state = "paused";
     this.editMessage = null;
     this.drawing.cancel();
+    // The session clears the probes themselves - a place in one domain is not
+    // a place in another - so what is left here is the selection pointing at
+    // one that no longer exists.
+    this.probeSelection = null;
+    this.hoverPoint = null;
 
     this.syncScenario();
     this.syncBoundaryForm();
@@ -640,6 +774,14 @@ export class Harness {
       scale: this.scale,
       band: BAND,
     });
+    // Last, so a marker is never painted over by the picture it refers to.
+    drawProbeMarkers(this.renderer.context, this.session.probes.probes, {
+      originX: MARGIN,
+      originY: MARGIN,
+      scale: this.scale,
+      h: grid.h,
+      ny: grid.ny,
+    });
     this.updateReadouts(inspection, divergence, health, view);
   }
 
@@ -707,6 +849,7 @@ export class Harness {
 
     this.updateTracerReadouts();
     this.updateSourcePanel();
+    this.updateProbePanel();
     this.updateBoundaryPanel();
     this.updateGeometryPanel();
     this.updateLegend(view);
@@ -918,6 +1061,209 @@ export class Harness {
     }
     this.draw();
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Probes
+  // ---------------------------------------------------------------------------
+
+  // One sample as a line of text. A solid cell says so in words rather than
+  // printing six NaNs: the numbers are genuinely NaN and format.js would
+  // faithfully show them, but "NaN" reads as a broken simulation and this is
+  // the ordinary, correct answer for a point inside a wall.
+  describeSample(sample) {
+    if (!sample.inside) return "outside the domain";
+    return `${describePosition(sample)}  ${describeValues(sample)}`;
+  }
+
+  // What the pressure numbers are measured against. Asked of the compiled
+  // boundary plan through the solver's own predicate, so the panel cannot
+  // claim a datum the solver is not using.
+  pressureDatum() {
+    // Short. The reasoning behind it is in the panel's note, where it can be
+    // read once; repeating it in a readout that sits beside live numbers made
+    // the datum eight wrapped lines tall and buried everything under it.
+    return pressureIsGauge(this.plan) ? "gauge (zero-mean)" : "absolute (prescribed)";
+  }
+
+  updateProbeHover() {
+    const node = this.root.querySelector("#probehover");
+    const sample = this.hoverPoint === null
+      ? null
+      : probeAt(this.scenario.grid, this.hoverPoint.x, this.hoverPoint.y, {
+        nu: this.scenario.params.nu,
+      });
+    if (sample === null || !sample.inside) {
+      node.textContent = "hover the field to read a cell";
+      node.classList.remove("bad");
+      return;
+    }
+    node.textContent = this.describeSample(sample);
+    // A cell that is neither solid nor finite is a broken one, and that is the
+    // one case here that should read as alarming.
+    node.classList.toggle("bad", !sample.solid && !sample.finite);
+  }
+
+  updateProbePanel() {
+    const { root, session } = this;
+    const probes = session.probes.probes;
+    const list = root.querySelector("#probelist");
+
+    // The ROW STRUCTURE is rebuilt only when the set of probes changes; the
+    // VALUES are refreshed every repaint. Rebuilding the rows each frame would
+    // discard and re-create a remove button sixty times a second, which makes
+    // it unclickable.
+    const signature = probes.map((probe) => probe.id).join(",");
+    if (list.dataset.builtFor !== signature) {
+      list.innerHTML = "";
+      for (const probe of probes) {
+        const row = document.createElement("div");
+        row.className = "probrow";
+        row.dataset.probe = String(probe.id);
+
+        // Two lines: an identifying header, and the reading under it. One line
+        // wrapped to five in a side panel, which made three probes unreadable.
+        const head = document.createElement("div");
+        head.className = "phead";
+        const dot = document.createElement("span");
+        dot.className = "pdot";
+        dot.style.background = probe.colour;
+        const label = document.createElement("span");
+        label.className = "plabel";
+        label.textContent = probe.label;
+        const where = document.createElement("span");
+        where.className = "pwhere";
+        const drop = document.createElement("button");
+        drop.className = "gdrop";
+        drop.textContent = "remove";
+        drop.addEventListener("click", () => {
+          if (!session.removeProbe(probe.id)) return;
+          if (this.probeSelection === probe.id) this.probeSelection = null;
+          this.draw();
+        });
+        head.append(dot, label, where, drop);
+
+        const values = document.createElement("span");
+        values.className = "pvals";
+        row.append(head, values);
+        list.appendChild(row);
+      }
+      list.dataset.builtFor = signature;
+    }
+
+    for (const probe of probes) {
+      const row = list.querySelector(`.probrow[data-probe="${probe.id}"]`);
+      if (row === null) continue;
+      // Read fresh rather than from the last recorded sample, so a paused run
+      // still shows the field as it stands instead of the moment it stopped.
+      const sample = session.readProbe(probe);
+      row.querySelector(".pwhere").textContent = describePosition(sample);
+      row.querySelector(".pvals").textContent = describeValues(sample);
+      row.querySelector(".pvals").classList.toggle(
+        "bad", sample.inside && !sample.solid && !sample.finite
+      );
+    }
+
+    // Refreshed here too, so a hovered cell keeps reading live while the run
+    // advances rather than only when the pointer moves.
+    this.updateProbeHover();
+    root.querySelector("#pdatum").textContent = this.pressureDatum();
+    root.querySelector("#clearprobes").disabled = probes.length === 0;
+    this.syncProbeSelector(probes);
+    this.drawProbeChart();
+  }
+
+  syncProbeSelector(probes) {
+    const pick = this.root.querySelector("#probepick");
+    const signature = probes.map((probe) => `${probe.id}:${probe.label}`).join(",");
+    if (pick.dataset.builtFor !== signature) {
+      pick.innerHTML = "";
+      if (probes.length === 0) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "none pinned";
+        pick.appendChild(option);
+      }
+      for (const probe of probes) {
+        const option = document.createElement("option");
+        option.value = String(probe.id);
+        option.textContent = probe.label;
+        pick.appendChild(option);
+      }
+      pick.dataset.builtFor = signature;
+    }
+    // A selection that no longer exists - the probe was removed, or a scenario
+    // change cleared them all - falls back to the newest rather than leaving
+    // the chart pointed at nothing.
+    if (this.probeSelection !== null && !probes.some((p) => p.id === this.probeSelection)) {
+      this.probeSelection = null;
+    }
+    if (this.probeSelection === null && probes.length > 0) {
+      this.probeSelection = probes[probes.length - 1].id;
+    }
+    pick.value = this.probeSelection === null ? "" : String(this.probeSelection);
+    pick.disabled = probes.length === 0;
+  }
+
+  drawProbeChart() {
+    const canvas = this.root.querySelector("#probechart");
+    const context = canvas.getContext("2d");
+    const note = this.root.querySelector("#probeaxis");
+    const { width, height } = canvas;
+    const probe = this.probeSelection === null
+      ? null
+      : this.session.probes.probeById(this.probeSelection);
+
+    if (probe === null) {
+      context.clearRect(0, 0, width, height);
+      note.textContent = "no probe pinned - choose the Probe tool and click the field";
+      note.classList.remove("bad");
+      return;
+    }
+
+    const spec = PROBE_QUANTITIES[this.probeQuantity];
+    const layout = drawSeries(context, probe.history.series(this.probeQuantity), {
+      width, height, padding: 8, colour: probe.colour, background: "#12141a",
+    });
+
+    // "Nothing recorded" and "everything recorded is NaN" are different
+    // situations and must not share a message. A probe pinned inside a wall
+    // records a sample every step - of NaN, correctly - and telling its owner
+    // to press Run after a thousand steps is a readout describing a state the
+    // app is not in. Found by running the app rather than by a check, which is
+    // why there is now a check for it.
+    if (layout.points === 0) {
+      const recorded = probe.history.length;
+      if (recorded === 0) {
+        note.textContent = `${probe.label} ${spec.label}: no samples yet - press Run`;
+        note.classList.remove("bad");
+        return;
+      }
+      const solid = this.session.readProbe(probe).solid;
+      note.textContent = solid
+        ? `${probe.label} ${spec.label}: ${integer(recorded)} samples, all inside a wall - ` +
+          `nothing to plot until the solid around it is erased`
+        : `${probe.label} ${spec.label}: ${integer(recorded)} samples, NONE FINITE`;
+      // A solid cell is the ordinary correct answer, not a failure. A cell
+      // that is fluid and not finite is the other thing entirely.
+      note.classList.toggle("bad", !solid);
+      return;
+    }
+    const parts = [
+      `${probe.label} ${spec.label}: ${exponential(layout.range.lo, 2)} to ` +
+      `${exponential(layout.range.hi, 2)}`,
+      `t = ${fixed(layout.span.t0, 3)} to ${fixed(layout.span.t1, 3)}`,
+      `${integer(layout.points)} samples`,
+    ];
+    // Said in words, because a gap in a line is not self-explanatory and the
+    // alternative - drawing straight through it - would look like data.
+    if (layout.range.nonFinite > 0) {
+      parts.push(`${integer(layout.range.nonFinite)} NOT FINITE, drawn as gaps`);
+    }
+    if (layout.range.flat) parts.push("constant");
+    if (this.probeQuantity === "pressure") parts.push(`datum ${this.pressureDatum()}`);
+    note.textContent = parts.join("  -  ");
+    note.classList.toggle("bad", layout.range.nonFinite > 0);
   }
 
   // What sources are doing, drawn from the session's own array - the one the

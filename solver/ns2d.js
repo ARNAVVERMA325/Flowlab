@@ -246,6 +246,22 @@ export function applyVelocityBoundaryConditions(grid, bc, u, v, mass = null) {
 
 // No-slip on the surface of an obstacle.
 //
+// Whether the pressure field is determined only up to an additive constant.
+//
+// With no pressure prescribed anywhere the Poisson problem is pure Neumann.
+// Its solution has a constant null space, the solver projects that out, and
+// what comes back is a GAUGE: differences between cells mean something, the
+// value at any one cell does not. With a pressure boundary, or a pressure
+// attached to a drawn surface, the solution is unique and the value is
+// absolute.
+//
+// Exported because a probe reporting "p = 0.37" is reporting nothing at all
+// unless it can say which of those two it is - and a second copy of this rule
+// in the display layer would be free to disagree with the solver's own.
+export function pressureIsGauge(plan) {
+  return !plan?.hasPressure && !plan?.surfaces?.hasSurfacePressure;
+}
+
 // A face with exactly one solid neighbour cell lies on the body surface, and
 // its velocity component is normal to that surface: it is set to zero, which
 // is both no-penetration and half of no-slip.
@@ -1117,7 +1133,7 @@ function scratchFor(grid, plan) {
       // With a prescribed pressure anywhere the constant null space is gone,
       // and projecting it out would remove a component the boundary condition
       // legitimately fixes.
-      singular: !plan?.hasPressure && !plan?.surfaces?.hasSurfacePressure,
+      singular: pressureIsGauge(plan),
       // CG work vectors, allocated once per grid rather than per timestep.
       work: {
         r: new Float64Array(size),

@@ -50,6 +50,13 @@ Read this before starting any implementation session.
    | 5 | `!solid[...]` | can this face carry flow | the tracer skipped drawn outlets — dye +70.4% over 400 steps |
    | 6 | boundary faces only | does this region gain or lose volume | M6 interior mass sources — a legitimate source with an outlet was rejected |
 
+   A seventh case of the same shape turned up in M7 and is deliberately **not** in the
+   table, because nothing broke: "local Re" names two quantities — the cell Reynolds
+   number `|u|h/ν`, which is genuinely local, and the characteristic-length one, which is
+   what the phrase usually means and is not. They differ by 4–192× across these scenarios.
+   It was caught while deciding what to call the readout rather than after shipping it,
+   which is the first time that has happened and is what this item is for.
+
    The general defence, when one exists, is a check that measures the CONSEQUENCE rather
    than auditing the causes — `assertRegionsAreSolvable` is that for the pressure equation,
    and it caught instances 1, 2 and 3 at once. Where no such check exists, the question has
@@ -202,7 +209,12 @@ Not scheduled. Do not start any of these while a NOW milestone is open.
 
 - **M6 — Sources and injection**: full-wall inlet, point source, mouse momentum brush, dye
 - **M7 — Probes**: click anywhere for position, u, v, speed, pressure, vorticity, local Re;
-  plot any quantity over time
+  plot any quantity over time.
+  *Built — see `docs/M7-probes.md`. Two names were changed on the way: "local Re" is
+  reported as **cell Re** (`|u|h/ν`), because the characteristic-length Reynolds number
+  the phrase usually means is not local and differs by 4–192× here; and pressure is never
+  shown without its datum, because with nothing prescribing one the field is only defined
+  up to a constant.*
 - **M8 — Visualization modes**: velocity vectors, streamlines, pathlines, vorticity,
   divergence, density — switchable without altering the simulation
 - **M9 — Flow analysis**: Reynolds number, velocity gradients, shear, separation and

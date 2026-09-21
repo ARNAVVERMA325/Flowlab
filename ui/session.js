@@ -59,6 +59,7 @@ import { step } from "../solver/ns2d.js";
 import { computeStableTimestep } from "../solver/stability.js";
 import { sourcePlanFor } from "../sources/compile.js";
 import { combineSources } from "./brush.js";
+import { ProbeSet } from "./probes.js";
 import { validateSource } from "../sources/kinds.js";
 import { buildScenario } from "../scenarios/index.js";
 
@@ -81,6 +82,8 @@ export class SimulationSession {
     this.placedSources = scenario.sources ?? [];
     this.brushSource = null;
     this.#rebuildSources();
+    // Created before reset(), which clears their history.
+    this.probes = new ProbeSet();
     this.reset();
   }
 
@@ -177,6 +180,35 @@ export class SimulationSession {
     this.#rebuildSources();
     return true;
   }
+
+  // A probe is pinned at a physical point, and the domain is what says whether
+  // that point exists. Refused here rather than stored and reported as "not
+  // inside" forever, because a probe outside the domain can never become
+  // useful: nothing an edit can do brings cells into being out there.
+  //
+  // A point inside a WALL is accepted. That is a different case - the cell is
+  // real, it currently holds no fluid, and erasing the wall around it is an
+  // ordinary thing to do - so the probe stays pinned and reports "solid" until
+  // it does.
+  addProbe(x, y) {
+    const { nx, ny, h } = this.scenario.grid;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > nx * h || y > ny * h) {
+      throw new RangeError(
+        `a probe at (${x}, ${y}) is outside the domain, which spans ` +
+        `0..${nx * h} by 0..${ny * h}`
+      );
+    }
+    return this.probes.add(x, y);
+  }
+
+  removeProbe(id) { return this.probes.remove(id); }
+  clearProbes() { return this.probes.clear(); }
+
+  // What a probe reads right now, without recording it - for a hover readout,
+  // which must not put samples into a history the plot is drawing.
+  readProbe(probe) {
+    return this.probes.read(this.scenario.grid, probe, { nu: this.scenario.params.nu });
+  }
   get canUndo() { return this.editor.canUndo; }
   get canRedo() { return this.editor.canRedo; }
 
@@ -194,6 +226,10 @@ export class SimulationSession {
     this.tracer = new PassiveTracer(this.scenario.grid);
     this.tracerConfig = tracerConfigFor(this.scenarioId);
     this.tracer.seed(this.scenario.grid, this.tracerConfig.seed);
+
+    // The probes stay pinned; what they read does not survive a field that was
+    // replaced rather than advanced. See the note at the top of ui/probes.js.
+    this.probes.clearHistory();
 
     this.iteration = 0;
     this.simulatedTime = 0;
@@ -318,6 +354,10 @@ export class SimulationSession {
     this.lastStep = step(grid, bc, { ...params, dt: selection.dt, sources });
     this.iteration++;
     this.simulatedTime += selection.dt;
+    // Sampled here, inside the step, rather than in the harness's draw(). The
+    // harness runs up to four steps per frame, so sampling on repaint would
+    // keep one reading in four and alias anything varying near the step rate.
+    this.probes.sample(grid, this.simulatedTime, { nu: params.nu });
     this.lastTracer = this.tracer.advect(grid, bc, selection.dt, {
       inject: this.tracerConfig.inject,
       // The dye a source carries is read here and nowhere below the display
@@ -339,8 +379,9 @@ export class SimulationSession {
     // the same domain, and discarding them because a wall moved would lose
     // work for no reason.
     this.boundaries = this.#makeBoundaryEditor(scenario);
-    // Sources describe places in a particular domain, so a scenario change
-    // discards them exactly as it discards a geometry document.
+    // Sources and probes describe places in a particular domain, so a scenario
+    // change discards them exactly as it discards a geometry document.
+    this.probes.clear();
     this.placedSources = scenario.sources ?? [];
     this.brushSource = null;
     this.#rebuildSources();

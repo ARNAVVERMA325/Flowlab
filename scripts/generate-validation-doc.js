@@ -280,6 +280,21 @@ async function main() {
     "domain stays a rectangle and per-region pressure solving is deferred."
   );
   lines.push("");
+  lines.push(
+    "From `docs/M7-probes.md`: a probe reports a CELL, not an interpolated " +
+    "point - velocities averaged from that cell's own faces, vorticity from its " +
+    "four corners - so nothing it shows resolves finer than one cell. The " +
+    "vorticity it reports is second order in the interior and measured as such " +
+    "below; against a wall the corner values come from the surface faces, " +
+    "making that estimate one-sided and first order, and that is NOT measured. " +
+    "Pressure is reported with its datum named, because with nothing " +
+    "prescribing a pressure the field is only defined up to a constant and the " +
+    "solver fixes it by zero-meaning. The per-probe Reynolds number is the CELL " +
+    "Reynolds number |u|h/nu, which is a property of the mesh as much as of the " +
+    "flow and is smaller than the scenario's Reynolds number by a factor of 4 " +
+    "to 192 across these cases."
+  );
+  lines.push("");
   const unverified = Object.values(REFERENCES).filter((r) => r.verification === "unverified");
   if (unverified.length) {
     lines.push(

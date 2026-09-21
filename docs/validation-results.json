@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-06 17:20:32 UTC",
+  "generatedAt": "2026-09-21 04:52:15 UTC",
   "cases": {
     "still-water": {
       "label": "Still water",
@@ -420,6 +420,55 @@
           "reference": 0,
           "measured": 0,
           "tolerance": 0,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        }
+      ]
+    },
+    "probe-quantities": {
+      "label": "Probe quantities",
+      "classification": "benchmarked",
+      "reference": {
+        "id": "taylorGreenVorticity",
+        "citation": "Taylor-Green vortex field u = -cos(x)sin(y), v = sin(x)cos(y), whose vorticity dv/dx - du/dy is 2*cos(x)*cos(y) everywhere.",
+        "verification": "derived"
+      },
+      "caveat": "This validates the SAMPLER against a given field, not the field. A probe reports whatever the solver produced, so its accuracy is the solver's accuracy plus this. Two limits belong to the reading itself: against a wall the corner values come from the surface faces, making that estimate one-sided and first-order among second-order ones; and the whole reading is cell-centred rather than interpolated, so a probe resolves nothing finer than one cell. Neither is measured here.",
+      "measuredBy": "tests/test16_m7_probes.js",
+      "claims": [
+        {
+          "quantity": "vorticity at a node, order of convergence (Taylor-Green)",
+          "reference": 2,
+          "measured": 1.998696332719226,
+          "tolerance": 0.15,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "vorticity at a cell centre, order of convergence (Taylor-Green)",
+          "reference": 2,
+          "measured": 1.9623861239859721,
+          "tolerance": 0.15,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "vorticity in solid-body rotation, exact",
+          "reference": 0,
+          "measured": 1.7763568394002505e-15,
+          "tolerance": 1e-14,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "velocity at a cell vs its own faces, linear field",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 1e-15,
           "relative": false,
           "referenceType": "invariant",
           "result": "pass"

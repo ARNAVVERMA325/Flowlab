@@ -4,7 +4,7 @@
 
 Every number below was measured by running the solver through the same harnesses the test suite uses (`validation/measure.js`), and compared against references declared in `validation/registry.js`. A hand-maintained validation record can drift from the code while still reading as authority, which is the one failure mode a document like this must not have.
 
-Generated 2026-09-06 17:20:32 UTC.
+Generated 2026-09-21 04:52:15 UTC.
 
 ## How to read this
 
@@ -39,6 +39,7 @@ The distinction carries real weight. A cavity agreeing with published measuremen
 | Pressure-driven channel | `benchmarked` | planePoiseuille | `derived` |
 | Drawn geometry and surface conditions | `self-validated` | invariants only | — |
 | Interior sources | `self-validated` | invariants only | — |
+| Probe quantities | `benchmarked` | taylorGreenVorticity | `derived` |
 
 ## Still water
 
@@ -219,6 +220,29 @@ The M6 source model, against exact invariants only. Three things are established
 | momentum source: overshoot past its target in one step | 0 | 0<br><sub>relaxation times from 1e-9 to 10 against a timestep of 4.167e-3</sub> | 0 | pass |
 | golden fields moved by compiling the source path in | 0 | 0<br><sub>13 cases, asserted byte-identical in tests/test13_m6_sources.js</sub> | 0 | pass |
 
+## Probe quantities
+
+**Classification:** `benchmarked` — checked against a reference external to this project, so being wrong is detectable from outside
+
+**Asserted by:** `tests/test16_m7_probes.js`
+
+Vorticity is the one quantity M7 adds that is not simply read out of the field, and on a staggered grid a sign slip or a transposed index produces a plausible-looking picture rather than an obvious failure - so it is checked against a closed-form field rather than against itself. Two comparisons. At a cell CORNER, where the quantity naturally lives, both differences are centred on the point and the error falls as h^2. At a cell CENTRE, which is what a probe reports, the four-corner average adds a second-order term of its own that is about seven times larger in magnitude and leaves the rate unchanged - which is the justification for averaging at all: it costs a constant, not an order. Solid-body rotation is checked separately and exactly, since a linear field makes the quotients exact and therefore pins the formula and its sign with no tolerance at all.
+
+**Reference:** Taylor-Green vortex field u = -cos(x)sin(y), v = sin(x)cos(y), whose vorticity dv/dx - du/dy is 2*cos(x)*cos(y) everywhere.
+
+**Verification:** reproducible from the equations
+
+> Two lines of differentiation from the field itself, so there is nothing to transcribe and nothing to get wrong. Chosen because it is smooth and non-linear: a linear field makes the staggered difference quotients exact, which pins the formula but says nothing about its order.
+
+> ⚠️ **Caveat.** This validates the SAMPLER against a given field, not the field. A probe reports whatever the solver produced, so its accuracy is the solver's accuracy plus this. Two limits belong to the reading itself: against a wall the corner values come from the surface faces, making that estimate one-sided and first-order among second-order ones; and the whole reading is cell-centred rather than interpolated, so a probe resolves nothing finer than one cell. Neither is measured here.
+
+| quantity | reference | measured | tolerance | result |
+|---|---|---|---|---|
+| vorticity at a node, order of convergence (Taylor-Green) | 2 | 1.9987<br><sub>max error 1.28e-2 -> 3.21e-3 -> 8.03e-4 at n = 16, 32, 64</sub> | 0.15 | pass |
+| vorticity at a cell centre, order of convergence (Taylor-Green) | 2 | 1.96239<br><sub>max error 8.51e-2 -> 2.22e-2 -> 5.60e-3 at n = 16, 32, 64 - 7.0x the node error, same order</sub> | 0.15 | pass |
+| vorticity in solid-body rotation, exact | 0 | 1.776e-15<br><sub>angular rate 1.75, so the answer is exactly 3.5 everywhere</sub> | 1.000e-14 | pass |
+| velocity at a cell vs its own faces, linear field | 0 | 0<br><sub>u = 3x, v = -2y, where the face average is the exact centre value</sub> | 1.000e-15 | pass |
+
 ## Known limitations
 
 Carried forward from `docs/M1-solver-hardening.md`, which has the detail:
@@ -237,6 +261,8 @@ From `docs/M4-boundary-conditions.md`: the outlet condition is zero-gradient wit
 From `docs/M6-sources.md`: with a mass source running the flow is non-solenoidal ON PURPOSE at the cells it covers, so `max|div u|` there is q by design and the quantity that says whether the projection is working is the CONTINUITY ERROR, `max|div u - q|`. The two are the same number whenever no mass source is active, which is every case below. A momentum source cannot carry a face past its target in one step, which is what lets the timestep be sized against it; a boundary inlet has no such bound, so the first step of an impulsively started scenario is still taken outside the limit the driver believes it is enforcing - measured at CFL 5.145 on the sharp bend, and left recorded rather than fixed.
 
 From `docs/M5-interactive-geometry.md`: drawn shapes are SAMPLED onto the existing uniform grid - cell centres tested against a region - not meshed, so the staircase limitation above applies to anything drawn as much as to the cylinder. Solid surfaces can now carry the full condition set where they are axis-aligned; on a staircase surface, which has no single normal, only wall and free-slip are allowed and a flux-prescribing condition is refused rather than approximated. A domain whose fluid splits into regions is solved when every region's flux can be absorbed and REJECTED WITH A REASON when it cannot, rather than reported as converged; the pre-M5 solver reported 8.1e-8 for a field whose actual max|div u| was 2.950e-1 in one such case. The outer domain stays a rectangle and per-region pressure solving is deferred.
+
+From `docs/M7-probes.md`: a probe reports a CELL, not an interpolated point - velocities averaged from that cell's own faces, vorticity from its four corners - so nothing it shows resolves finer than one cell. The vorticity it reports is second order in the interior and measured as such below; against a wall the corner values come from the surface faces, making that estimate one-sided and first order, and that is NOT measured. Pressure is reported with its datum named, because with nothing prescribing a pressure the field is only defined up to a constant and the solver fixes it by zero-meaning. The per-probe Reynolds number is the CELL Reynolds number |u|h/nu, which is a property of the mesh as much as of the flow and is smaller than the scenario's Reynolds number by a factor of 4 to 192 across these cases.
 
 **1 reference is still unverified** (cylinderWakeLength). Any claim resting on it is weaker than the rest of this document, and should be read that way. Each one records what closing it would take, so it stays a piece of open work rather than a permanent disclaimer:
 

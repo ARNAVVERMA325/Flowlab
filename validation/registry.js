@@ -118,6 +118,19 @@ export const REFERENCES = {
       "rather than assuming it.",
   },
 
+  taylorGreenVorticity: {
+    id: "taylorGreenVorticity",
+    citation:
+      "Taylor-Green vortex field u = -cos(x)sin(y), v = sin(x)cos(y), whose " +
+      "vorticity dv/dx - du/dy is 2*cos(x)*cos(y) everywhere.",
+    verification: "derived",
+    verificationNote:
+      "Two lines of differentiation from the field itself, so there is nothing " +
+      "to transcribe and nothing to get wrong. Chosen because it is smooth and " +
+      "non-linear: a linear field makes the staggered difference quotients " +
+      "exact, which pins the formula but says nothing about its order.",
+  },
+
   planePoiseuille: {
     id: "planePoiseuille",
     citation:
@@ -376,6 +389,41 @@ export const CASES = [
       { quantity: "continuity error with a source driving the flow", reference: 0, tolerance: 1e-7, referenceType: "invariant" },
       { quantity: "momentum source: overshoot past its target in one step", reference: 0, tolerance: 0, referenceType: "invariant" },
       { quantity: "golden fields moved by compiling the source path in", reference: 0, tolerance: 0, referenceType: "invariant" },
+    ],
+  },
+  {
+    id: "probe-quantities",
+    label: "Probe quantities",
+    classification: "benchmarked",
+    measuredBy: "tests/test16_m7_probes.js",
+    reference: "taylorGreenVorticity",
+    rationale:
+      "Vorticity is the one quantity M7 adds that is not simply read out of " +
+      "the field, and on a staggered grid a sign slip or a transposed index " +
+      "produces a plausible-looking picture rather than an obvious failure - " +
+      "so it is checked against a closed-form field rather than against " +
+      "itself. Two comparisons. At a cell CORNER, where the quantity naturally " +
+      "lives, both differences are centred on the point and the error falls as " +
+      "h^2. At a cell CENTRE, which is what a probe reports, the four-corner " +
+      "average adds a second-order term of its own that is about seven times " +
+      "larger in magnitude and leaves the rate unchanged - which is the " +
+      "justification for averaging at all: it costs a constant, not an order. " +
+      "Solid-body rotation is checked separately and exactly, since a linear " +
+      "field makes the quotients exact and therefore pins the formula and its " +
+      "sign with no tolerance at all.",
+    caveat:
+      "This validates the SAMPLER against a given field, not the field. A " +
+      "probe reports whatever the solver produced, so its accuracy is the " +
+      "solver's accuracy plus this. Two limits belong to the reading itself: " +
+      "against a wall the corner values come from the surface faces, making " +
+      "that estimate one-sided and first-order among second-order ones; and " +
+      "the whole reading is cell-centred rather than interpolated, so a probe " +
+      "resolves nothing finer than one cell. Neither is measured here.",
+    claims: [
+      { quantity: "vorticity at a node, order of convergence (Taylor-Green)", reference: 2, tolerance: 0.15, referenceType: "analytical" },
+      { quantity: "vorticity at a cell centre, order of convergence (Taylor-Green)", reference: 2, tolerance: 0.15, referenceType: "analytical" },
+      { quantity: "vorticity in solid-body rotation, exact", reference: 0, tolerance: 1e-14, referenceType: "analytical" },
+      { quantity: "velocity at a cell vs its own faces, linear field", reference: 0, tolerance: 1e-15, referenceType: "invariant" },
     ],
   },
 ];

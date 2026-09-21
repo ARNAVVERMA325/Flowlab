@@ -47,6 +47,12 @@ export const DRAW_TOOLS = {
     kind: "place",
     hint: "click to place a source at that point",
   },
+  probe: {
+    label: "Probe",
+    makes: null,
+    kind: "probe",
+    hint: "click to pin a probe; hover anywhere to read a cell",
+  },
 };
 
 // Preview colours. Additions read as the solid they will become; erasures read
