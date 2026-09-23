@@ -3,407 +3,644 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FlowLab - solver harness</title>
+<title>FlowLab — 2D Fluid Dynamics Explorer</title>
 <link rel="icon" href="data:,">
 
+<!--
+  Layout after docs/references/ui-reference.png, at the user's explicit request
+  (which overrides working agreement item 5 for this change - see
+  docs/UI-refresh.md). Every element id the harness and the browser checks rely
+  on is preserved; what moved is where each one lives and how it looks.
+-->
 <style>
   :root {
-    --surface: #1a1a19;
-    --panel: #212120;
-    --line: #33332f;
-    --ink: #e8e8e4;
-    --ink-dim: #9a9a92;
-    --accent: #6da7ec;
-    --bad: #ff5c8a;
+    --bg: #070b12;
+    --panel: #0e1522;
+    --panel-hi: #131c2c;
+    --line: #1d2839;
+    --line-hi: #2b3a52;
+    --ink: #e6ebf2;
+    --ink-dim: #8a97ab;
+    --ink-faint: #5d6a80;
+    --accent: #3b82f6;
+    --accent-soft: rgba(59, 130, 246, 0.14);
+    --good: #22c55e;
+    --warn: #e0b04c;
+    --bad: #f05d7a;
+    --rule: var(--line);
+    --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --radius: 10px;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
-    margin: 0; padding: 24px;
-    background: var(--surface); color: var(--ink);
-    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.45 var(--sans);
+    -webkit-font-smoothing: antialiased;
   }
-  h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; letter-spacing: .02em; }
-  .sub { color: var(--ink-dim); font-size: 12px; margin-bottom: 18px; }
-  .wrap { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; max-width: 1180px; }
-  .left { flex: 1 1 520px; min-width: 320px; }
-  .right { flex: 0 1 360px; min-width: 300px; }
 
-  #banner {
-    background: #3a1220; border: 1px solid var(--bad); color: #ffc2d3;
-    padding: 10px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 12px;
+  /* ---------------------------------------------------------------- shell */
+  .app {
+    display: grid; height: 100vh;
+    grid-template-columns: 264px minmax(0, 1fr) 340px;
+    grid-template-rows: 56px minmax(0, 1fr) 30px;
+    gap: 0;
   }
-  /* Intrinsic canvas dimensions carry the domain's aspect ratio; capping both
-     axes lets the browser scale it down without distorting the field. */
-  #field {
-    display: block; background: #000;
-    max-width: 100%; max-height: 72vh; width: auto; height: auto;
-    border: 1px solid var(--line); border-radius: 3px;
-    image-rendering: pixelated;
+  .topbar {
+    grid-column: 1 / -1; display: flex; align-items: center; gap: 18px;
+    padding: 0 16px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #0b1220, #080d16);
   }
-  #note { color: var(--ink-dim); font-size: 12px; margin: 8px 0 0; }
+  .sidebar, .stage { overflow-y: auto; padding: 12px; min-height: 0; }
+  .sidebar.left { border-right: 1px solid var(--line); }
+  .sidebar.right { border-left: 1px solid var(--line); }
+  .stage { display: flex; flex-direction: column; gap: 12px; }
+  /* Flex children shrink by default, and in a fixed-height column that
+     squeezed the canvas card to a strip and clipped the field. */
+  .stage > * { flex-shrink: 0; }
+  .statusbar {
+    grid-column: 1 / -1; display: flex; align-items: center; gap: 18px;
+    padding: 0 16px; border-top: 1px solid var(--line);
+    color: var(--ink-faint); font-size: 11.5px; background: #080d16;
+  }
+  .statusbar .grow { flex: 1 1 auto; }
+  .statusbar b { color: var(--ink-dim); font-weight: 500; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 11px;
+    border: 1px solid var(--line-hi); border-radius: 999px; padding: 1px 8px;
+    color: var(--ink-dim); font-family: var(--mono);
+  }
+  .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); }
+  .chip[data-state="running"]::before { background: var(--good); box-shadow: 0 0 6px var(--good); }
+  .chip[data-state="failed"]::before { background: var(--bad); }
+  .chip[data-state="paused"]::before { background: var(--warn); }
 
-  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  /* --------------------------------------------------------------- topbar */
+  .brand { display: flex; align-items: center; gap: 10px; min-width: 232px; }
+  .brand svg { flex: none; }
+  .brand .name { font-size: 17px; font-weight: 650; letter-spacing: .01em; }
+  .brand .tag2 { color: var(--ink-dim); font-size: 11px; margin-top: -2px; }
+  .tb-field { display: flex; align-items: center; gap: 8px; color: var(--ink-dim); font-size: 12px; }
+  .tb-field select { min-width: 230px; }
+  .transport {
+    display: flex; gap: 2px; padding: 3px; border: 1px solid var(--line);
+    border-radius: 9px; background: var(--panel);
+  }
+  .transport button { border: none; background: transparent; padding: 6px 12px; display: flex; gap: 7px; align-items: center; }
+  .transport button:hover:not(:disabled) { background: var(--panel-hi); }
+  .transport #run:not(:disabled) { color: #fff; background: var(--accent); }
+  .readouts {
+    display: flex; gap: 0; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--panel); margin-left: auto;
+  }
+  .readouts > div { padding: 5px 14px; display: flex; flex-direction: column; min-width: 86px; }
+  .readouts > div + div { border-left: 1px solid var(--line); }
+  .readouts span { color: var(--ink-faint); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+  .readouts b { font: 500 12.5px/1.3 var(--mono); font-variant-numeric: tabular-nums; }
+  .readouts b.bad { color: var(--bad); }
+
+  /* ------------------------------------------------------------- controls */
   button {
-    font: inherit; color: var(--ink); background: #2b2b29;
-    border: 1px solid var(--line); border-radius: 3px;
-    padding: 6px 16px; cursor: pointer;
+    font: inherit; color: var(--ink); background: var(--panel-hi);
+    border: 1px solid var(--line-hi); border-radius: 7px;
+    padding: 6px 12px; cursor: pointer; transition: border-color .12s, background .12s;
   }
   button:hover:not(:disabled) { border-color: var(--accent); }
   button:disabled { opacity: .38; cursor: default; }
-  select {
-    font: inherit; color: var(--ink); background: #2b2b29;
-    border: 1px solid var(--line); border-radius: 3px; padding: 6px 8px;
+  select, input[type="number"] {
+    font: inherit; color: var(--ink); background: var(--panel-hi);
+    border: 1px solid var(--line-hi); border-radius: 7px; padding: 5px 8px;
   }
+  select:focus, input:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .check { display: flex; align-items: center; gap: 7px; color: var(--ink-dim); font-size: 12px; cursor: pointer; }
+  .check input { accent-color: var(--accent); }
 
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 14px 16px; }
-  .panel + .panel { margin-top: 12px; }
-  .panel h2 {
-    font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
-    color: var(--ink-dim); font-weight: 600; margin: 0 0 10px;
+  /* ---------------------------------------------------------------- cards */
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 12px 14px;
   }
-  dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; }
-  dt { color: var(--ink-dim); white-space: nowrap; }
-  dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; word-break: break-word; }
-  dd.bad { color: var(--bad); font-weight: 700; }
-
-  .legend { margin-top: 12px; }
-  #legendbar { height: 10px; border-radius: 2px; border: 1px solid var(--line); }
-  .legend .ends { display: flex; justify-content: space-between; color: var(--ink-dim); font-size: 11px; margin-top: 4px; }
-  .key { display: flex; gap: 14px; margin-top: 10px; color: var(--ink-dim); font-size: 11px; flex-wrap: wrap; }
-  .key span { display: flex; align-items: center; gap: 5px; }
-  .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; border: 1px solid #00000060; }
-
-  .good { color: #7fd18b; } .partial { color: #e0c46c; } .bad { color: var(--bad); }
-  dd.good, dd.partial, dd.bad { font-weight: 700; }
-  .vtable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
-  .vtable th { text-align: left; color: var(--ink-dim); font-weight: 600; padding: 2px 0; }
-  .vtable th:nth-child(n+2), .vtable td.num { text-align: right; }
-  .vtable td { padding: 2px 0; vertical-align: top; }
-  .vtable td:not(:first-child) { padding-left: 10px; white-space: nowrap; }
-  .vtable .dim { color: var(--ink-dim); }
-  .vnote { color: var(--ink-dim); font-size: 11px; margin: 8px 0 0; line-height: 1.45; }
+  .sidebar .card + .card { margin-top: 12px; }
+  .card h2 {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--ink-dim); font-weight: 650; margin: 0 0 10px;
+  }
+  .card h2 .spacer { flex: 1 1 auto; }
+  .card h2 button { text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 11.5px; padding: 3px 9px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; margin: 0; }
+  dt { color: var(--ink-dim); white-space: nowrap; font-size: 12px; }
+  dd {
+    margin: 0; text-align: right; font: 12px/1.45 var(--mono);
+    font-variant-numeric: tabular-nums; word-break: break-word;
+  }
+  dd.bad, .bad { color: var(--bad); }
+  dd.bad { font-weight: 700; }
+  dd.pending { color: var(--warn); font-weight: 700; }
+  .good { color: var(--good); } .partial { color: var(--warn); }
+  dd.good, dd.partial { font-weight: 700; }
+  .vnote { color: var(--ink-dim); font-size: 11.5px; margin: 8px 0 0; line-height: 1.5; }
   .vnote.bad { color: #ffc2d3; }
-  .legend .ends span:nth-child(2) { color: var(--ink-dim); }
-  .bcrow { display: flex; align-items: baseline; gap: 7px; margin: 3px 0; font-size: 12px; }
+  details { margin-top: 8px; }
+  details summary {
+    cursor: pointer; color: var(--ink-faint); font-size: 11.5px;
+    list-style: none; user-select: none;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: "▸ "; }
+  details[open] summary::before { content: "▾ "; }
+  details .vnote { margin-top: 6px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .row button { flex: 1 1 auto; padding: 5px 8px; font-size: 12px; }
+
+  #banner {
+    background: #3a1220; border: 1px solid var(--bad); color: #ffc2d3;
+    padding: 10px 12px; border-radius: var(--radius); font-size: 12px;
+  }
+
+  /* ------------------------------------------------------------ geometry */
+  .toollist { display: flex; flex-direction: column; gap: 2px; }
+  button.tool {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    text-align: left; border: 1px solid transparent; background: transparent;
+    padding: 6px 8px; font-size: 12.5px; color: var(--ink);
+  }
+  button.tool svg { flex: none; opacity: .8; }
+  button.tool:hover:not(:disabled) { background: var(--panel-hi); border-color: transparent; }
+  button.tool.on { background: var(--accent-soft); border-color: rgba(59,130,246,.55); color: #cfe0ff; }
+  .geomrow { display: flex; align-items: baseline; gap: 7px; margin: 3px 0; font-size: 12px; }
+  .geomrow .gtext { flex: 1 1 auto; word-break: break-word; }
+  .geomrow .gdrop, .probrow .gdrop {
+    flex: none; padding: 0 6px; font-size: 11px; line-height: 1.5;
+    color: var(--ink-dim); background: transparent; border-color: transparent;
+  }
+  .geomrow .gdrop:hover:not(:disabled), .probrow .gdrop:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
+  .geomrow .gindex { color: var(--ink-faint); width: 18px; flex: none; text-align: right; }
+  #geomlist:empty::after { content: "no shapes drawn"; color: var(--ink-faint); font-size: 12px; }
+
+  /* ---------------------------------------------------------- boundaries */
+  .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; border: 1px solid #00000060; }
+  .bcrow { display: flex; align-items: baseline; gap: 7px; margin: 4px 0; font-size: 12px; }
   .bcrow .sw { flex: none; position: relative; top: 1px; }
-  .bcside { color: var(--ink-dim); width: 44px; flex: none; }
+  .bcside { color: var(--ink-dim); width: 46px; flex: none; }
   .bctext { display: flex; flex-direction: column; }
-  .bcextent { color: var(--ink-dim); font-size: 11px; }
+  .bcextent { color: var(--ink-faint); font-size: 11px; }
   .bcflux { margin-top: 10px; }
   .bcedit {
-    margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+    margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
     display: flex; flex-direction: column; gap: 7px;
   }
   .bcedit select { width: 100%; }
   .bcfields { display: flex; gap: 6px; flex-wrap: wrap; }
-  .bcfields label { display: flex; align-items: center; gap: 4px; color: var(--ink-dim); font-size: 12px; }
-  .bcfields input {
-    font: inherit; font-size: 12px; width: 68px; padding: 3px 5px;
-    color: var(--ink); background: #2b2b29;
-    border: 1px solid var(--line); border-radius: 3px;
-  }
+  .bcfields label { display: flex; align-items: center; gap: 5px; color: var(--ink-dim); font-size: 12px; }
+  .bcfields input { font-size: 12px; width: 66px; padding: 4px 6px; }
   .bcfields .req { color: var(--ink); }
   .bcbuttons { display: flex; gap: 6px; }
-  .bcbuttons button { padding: 5px 12px; font-size: 12px; flex: 1 1 auto; }
+  .bcbuttons button { padding: 5px 10px; font-size: 12px; flex: 1 1 auto; }
   #bcedithint.bad { color: var(--bad); }
   .tag {
     text-transform: none; letter-spacing: 0; font-weight: 500;
-    color: #7fb07f; border: 1px solid #3d5a3d; border-radius: 3px;
-    padding: 1px 5px; margin-left: 6px; font-size: 10px;
+    color: #7fd1a0; border: 1px solid #2c5a41; border-radius: 999px;
+    padding: 0 7px; font-size: 10px;
   }
-  .ctlabel { color: var(--ink-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-  .tools { display: flex; gap: 4px; }
-  button.tool { padding: 6px 10px; font-size: 12px; }
-  button.tool.on { border-color: var(--accent); color: var(--accent); background: #23303f; }
-  .check { display: flex; align-items: center; gap: 5px; color: var(--ink-dim); font-size: 12px; }
-  .check input { accent-color: var(--accent); }
-  #field.drawing { cursor: crosshair; }
-  .geomrow { display: flex; align-items: baseline; gap: 7px; margin: 3px 0; font-size: 12px; }
-  .geomrow .gtext { flex: 1 1 auto; word-break: break-word; }
-  .geomrow .gdrop {
-    flex: none; padding: 0 6px; font-size: 11px; line-height: 1.4;
-    color: var(--ink-dim); background: transparent; border-color: transparent;
+
+  /* --------------------------------------------------------------- canvas */
+  .canvas-card { padding: 0; overflow: hidden; }
+  .canvas-head {
+    display: flex; align-items: center; gap: 12px; padding: 9px 14px;
+    border-bottom: 1px solid var(--line); min-height: 40px;
   }
-  .geomrow .gdrop:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
-  .geomrow .gindex { color: var(--ink-dim); width: 18px; flex: none; text-align: right; }
-  #geomlist:empty::after { content: "no shapes drawn"; color: var(--ink-dim); font-size: 12px; }
-  .ctnote { color: var(--ink-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .canvas-head .title { font-weight: 600; font-size: 13px; }
   .drawstatus {
-    color: var(--ink-dim); font-size: 12px; margin: -4px 0 10px;
-    min-height: 1.5em; font-variant-numeric: tabular-nums;
+    color: var(--ink-dim); font-size: 12px; margin: 0; margin-left: auto;
+    font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right;
   }
   .drawstatus.bad { color: var(--bad); font-weight: 700; }
-  .probrow {
-    margin: 6px 0; font-size: 12px; font-variant-numeric: tabular-nums;
-    border-left: 1px solid var(--rule); padding-left: 7px;
+  .canvas-wrap {
+    display: flex; justify-content: center; align-items: center; padding: 14px;
+    background:
+      radial-gradient(circle at 50% 40%, rgba(59,130,246,.06), transparent 70%),
+      repeating-linear-gradient(0deg, transparent 0 23px, rgba(148,163,184,.04) 23px 24px),
+      repeating-linear-gradient(90deg, transparent 0 23px, rgba(148,163,184,.04) 23px 24px),
+      #05080e;
   }
-  .probrow .phead { display: flex; align-items: baseline; gap: 7px; }
-  .probrow .pdot { flex: none; width: 9px; height: 9px; border-radius: 50%; }
+  /* Intrinsic canvas dimensions carry the domain's aspect ratio; capping both
+     axes lets the browser scale it down without distorting the field. */
+  #field {
+    display: block; background: #02040a;
+    max-width: 100%; max-height: 60vh; width: auto; height: auto;
+    border-radius: 6px; box-shadow: 0 0 0 1px var(--line), 0 12px 40px rgba(0,0,0,.45);
+  }
+  #field.cells { image-rendering: pixelated; }
+  #field.drawing { cursor: crosshair; }
+  .canvas-foot {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 18px;
+    align-items: end; padding: 10px 14px 12px; border-top: 1px solid var(--line);
+  }
+  .legend-title { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+  .legend-title .sub2 { color: var(--ink-faint); font-weight: 400; margin-left: 6px; }
+  #legendbar { height: 11px; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); max-width: 420px; }
+  .legend .ends {
+    display: flex; justify-content: space-between; max-width: 420px;
+    color: var(--ink-dim); font: 11px var(--mono); margin-top: 4px;
+  }
+  .key { display: flex; gap: 12px; margin-top: 8px; color: var(--ink-faint); font-size: 11px; flex-wrap: wrap; }
+  .key span { display: flex; align-items: center; gap: 5px; }
+  .foot-controls { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+  .foot-controls label { display: flex; gap: 8px; align-items: center; color: var(--ink-dim); font-size: 12px; }
+  .scalebar { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 90px; }
+  #scalebarline { height: 6px; border: 1.5px solid var(--ink-dim); border-top: none; width: 60px; }
+  #scalebarlabel { color: var(--ink-dim); font: 11px var(--mono); white-space: nowrap; }
+  #note { color: var(--ink-dim); font-size: 12px; margin: 0; }
+
+  /* ----------------------------------------------------------- mode tiles */
+  .modes-row { display: flex; gap: 14px; align-items: stretch; flex-wrap: wrap; }
+  .modetiles, .overlaytiles { display: flex; gap: 6px; flex-wrap: wrap; }
+  .overlaytiles { padding-left: 14px; border-left: 1px solid var(--line); }
+  .modetile, .overlaytile {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    width: 84px; padding: 8px 4px 7px; border-radius: 8px;
+    background: var(--panel-hi); border: 1px solid var(--line);
+    color: var(--ink-dim); font-size: 11.5px; cursor: pointer; text-align: center;
+    position: relative; user-select: none;
+  }
+  .modetile:hover, .overlaytile:hover { border-color: var(--line-hi); color: var(--ink); }
+  .modetile[aria-checked="true"] {
+    border-color: var(--accent); color: #fff;
+    background: linear-gradient(180deg, rgba(59,130,246,.22), rgba(59,130,246,.08));
+  }
+  .modetile .swatch { width: 60px; height: 26px; border-radius: 4px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+  .overlaytile svg { width: 60px; height: 26px; }
+  .overlaytile:has(input:checked) { border-color: var(--accent); color: #fff; background: rgba(59,130,246,.12); }
+  .overlaytile input {
+    appearance: none; -webkit-appearance: none; position: absolute; top: 6px; right: 6px;
+    width: 9px; height: 9px; margin: 0; border-radius: 50%;
+    border: 1px solid var(--line-hi); background: transparent; cursor: pointer;
+  }
+  .overlaytile input:checked { background: var(--accent); border-color: var(--accent); }
+  .ctnote { color: var(--ink-faint); font-size: 11.5px; font-family: var(--mono); margin-top: 8px; }
+
+  /* --------------------------------------------------------- bottom cards */
+  .bottom-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .chart { width: 100%; height: 130px; display: block; border-radius: 6px; background: #0a101b; box-shadow: inset 0 0 0 1px var(--line); }
+  #probechart { margin: 6px 0 2px; }
+  .inline-selects { display: flex; gap: 6px; }
+  .inline-selects select { flex: 1 1 0; min-width: 0; font-size: 12px; }
+
+  /* --------------------------------------------------------------- probes */
+  .probrow { margin: 8px 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .probrow .phead { display: flex; align-items: baseline; gap: 8px; }
+  .probrow .pdot { flex: none; width: 10px; height: 10px; border-radius: 50%; position: relative; top: 1px; }
   .probrow .plabel { flex: none; font-weight: 700; }
-  .probrow .pwhere { flex: 1 1 auto; color: var(--ink-dim); }
-  .probrow .pvals { display: block; color: var(--ink-dim); word-spacing: 2px; }
+  .probrow .pwhere { flex: 1 1 auto; color: var(--ink-dim); font-family: var(--mono); font-size: 11.5px; }
+  .probrow .pvals { display: block; color: var(--ink-dim); word-spacing: 2px; font: 11.5px/1.5 var(--mono); padding-left: 18px; }
   .probrow .pvals.bad { color: var(--bad); font-weight: 700; }
-  .probrow .gdrop {
-    flex: none; padding: 0 6px; font-size: 11px; line-height: 1.4;
-    color: var(--ink-dim); background: transparent; border-color: transparent;
+  #probelist:empty::after { content: "no probes pinned"; color: var(--ink-faint); font-size: 12px; }
+  #probehover { margin: 0 0 6px; text-align: left; min-height: 2.9em; }
+
+  /* ----------------------------------------------------------- validation */
+  .vtable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+  .vtable th { text-align: left; color: var(--ink-dim); font-weight: 600; padding: 2px 0; }
+  .vtable th:nth-child(n+2), .vtable td.num { text-align: right; }
+  .vtable td { padding: 2px 0; vertical-align: top; }
+  .vtable td:not(:first-child) { padding-left: 10px; white-space: nowrap; font-family: var(--mono); }
+  .vtable .dim { color: var(--ink-dim); }
+  .srcrow { font-size: 12px; }
+  /* The validation record is a five-column table; in a sidebar it scrolls
+     sideways rather than pushing its last column off the card. */
+  #vdetail { overflow-x: auto; }
+  #vdetail .vtable { font-size: 11px; }
+
+  @media (max-width: 1180px) {
+    .app { display: block; height: auto; }
+    .sidebar, .stage { overflow: visible; }
+    .sidebar.left, .sidebar.right { border: none; }
+    .bottom-cards { grid-template-columns: 1fr; }
+    .readouts { margin-left: 0; }
+    .topbar { flex-wrap: wrap; height: auto; padding: 10px 16px; }
   }
-  .probrow .gdrop:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
-  #probelist:empty::after {
-    content: "no probes pinned"; color: var(--ink-dim); font-size: 12px;
-  }
-  #probechart {
-    width: 100%; height: 120px; display: block; margin: 6px 0 2px;
-    background: #12141a; border: 1px solid var(--rule);
-  }
-  /* Amber, not red. A field that has not been projected yet is not a broken
-     field, and red is reserved for things that are actually wrong. */
-  dd.pending { color: #e0c46c; font-weight: 700; }
 </style>
 </head>
 <body>
-<div id="app">
-  <h1>FlowLab &mdash; solver harness</h1>
-  <div class="sub">2D incompressible Navier&ndash;Stokes &middot; Chorin projection on a MAC staggered grid &middot; velocity magnitude</div>
+<div id="app" class="app">
 
-  <div class="wrap">
-    <div class="left">
-      <div id="banner" hidden></div>
-      <div class="controls">
-        <button id="run">Run</button>
-        <button id="pause">Pause</button>
-        <button id="reset">Reset</button>
-        <select id="scenario" aria-label="Scenario"></select>
-        <select id="mode" aria-label="View"></select>
-        <button id="reseed">Reseed dye</button>
-        <button id="cleardye">Clear dye</button>
-      </div>
-      <div class="controls">
-        <span class="ctlabel">overlay</span>
-        <label><input type="checkbox" id="showvectors"> vectors</label>
-        <label><input type="checkbox" id="showstreamlines"> streamlines</label>
-        <label><input type="checkbox" id="showpathlines"> pathlines</label>
-        <span id="overlaynote" class="ctnote">-</span>
-      </div>
-      <div class="controls">
-        <span class="ctlabel">draw</span>
-        <div id="tools" class="tools"></div>
+  <!-- ================================================================ top -->
+  <header class="topbar">
+    <div class="brand">
+      <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true">
+        <defs><linearGradient id="lg" x1="0" x2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#22d3ee"/></linearGradient></defs>
+        <path d="M3 11c5-5 9 5 14 0s9-5 12 0" fill="none" stroke="url(#lg)" stroke-width="2.6" stroke-linecap="round"/>
+        <path d="M3 17c5-5 9 5 14 0s9-5 12 0" fill="none" stroke="url(#lg)" stroke-width="2.6" stroke-linecap="round" opacity=".75"/>
+        <path d="M3 23c5-5 9 5 14 0s9-5 12 0" fill="none" stroke="url(#lg)" stroke-width="2.6" stroke-linecap="round" opacity=".5"/>
+      </svg>
+      <div><div class="name">FlowLab</div><div class="tag2">2D Fluid Dynamics Explorer</div></div>
+    </div>
+    <label class="tb-field">Scenario <select id="scenario" aria-label="Scenario"></select></label>
+    <div class="transport" role="group" aria-label="Run controls">
+      <button id="run" title="Run"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 1l9 5-9 5z" fill="currentColor"/></svg>Run</button>
+      <button id="pause" title="Pause"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 1h3v10H2zM7 1h3v10H7z" fill="currentColor"/></svg>Pause</button>
+      <button id="reset" title="Reset to the scenario's initial condition"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M6 1a5 5 0 1 1-4.6 3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M1 1v3.4h3.4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>Reset</button>
+    </div>
+    <div class="readouts">
+      <div><span>Status</span><b id="status">-</b></div>
+      <div><span>Time</span><b id="time">-</b></div>
+      <div><span>&Delta;t</span><b id="dt">-</b></div>
+      <div><span>Iter</span><b id="iteration">-</b></div>
+    </div>
+  </header>
+
+  <!-- ============================================================== left -->
+  <aside class="sidebar left">
+    <section class="card">
+      <h2>Geometry</h2>
+      <div id="tools" class="toollist"></div>
+      <div class="row">
         <button id="undo">Undo</button>
         <button id="redo">Redo</button>
-        <button id="clearshapes">Clear shapes</button>
-        <label class="check"><input type="checkbox" id="showregions" checked> tint regions</label>
+        <button id="clearshapes">Clear</button>
       </div>
-      <!-- The live drawing status sits here, under the tools and beside the
-           canvas, because it is read WHILE dragging. In the Geometry panel it
-           was correct and four panels down the right column, which on a laptop
-           put it below the fold - the one readout that makes the preview
-           trustworthy, off-screen at the moment it matters. -->
-      <div id="drawstatus" class="drawstatus">-</div>
-      <canvas id="field"></canvas>
-      <p id="note"></p>
-    </div>
-
-    <div class="right">
-      <div class="panel">
-        <h2>State</h2>
-        <dl>
-          <dt>status</dt><dd id="status">-</dd>
-          <dt>field</dt><dd id="fieldstate">-</dd>
-          <dt>iteration</dt><dd id="iteration">-</dd>
-          <dt>sim time</dt><dd id="time">-</dd>
-        </dl>
-      </div>
-
-      <div class="panel">
-        <h2>Validation</h2>
-        <dl>
-          <dt>status</dt><dd id="vclass">-</dd>
-          <dt>meaning</dt><dd id="vmeans">-</dd>
-          <dt>reference</dt><dd id="vref">-</dd>
-          <dt>reference is</dt><dd id="vrefstatus">-</dd>
-        </dl>
-        <div id="vdetail"></div>
-      </div>
-
-      <div class="panel">
-        <h2>Boundary conditions</h2>
-        <div id="bclist"></div>
-        <div class="bcedit">
-          <select id="bcside" aria-label="Side"></select>
-          <select id="bctype" aria-label="Boundary type"></select>
-          <div id="bcfields" class="bcfields"></div>
-          <div class="bcbuttons">
-            <button id="bcapply">Apply</button>
-            <button id="bcundo">Undo</button>
-            <button id="bcredo">Redo</button>
-          </div>
-          <p id="bcedithint" class="vnote"></p>
-        </div>
-        <dl class="bcflux">
-          <dt>flux in</dt><dd id="bcflux">-</dd>
-          <dt>net</dt><dd id="bcnet">-</dd>
-          <dt>regions</dt><dd id="bcregions">-</dd>
-        </dl>
-        <p class="vnote">Bands around the field show where each condition is
-        applied, drawn from the same compiled data the solver reads. Flux is
-        measured from the velocity field, positive into the domain; the net must
-        be zero for an incompressible domain.</p>
-      </div>
-
-      <div class="panel">
-        <h2>Sources</h2>
-        <div class="bcedit" style="margin-top:0;padding-top:0;border-top:none">
-          <div class="bcfields">
-            <label>speed<input id="brushspeed" type="number" step="any" value="1.5"></label>
-            <label>radius<input id="brushradius" type="number" step="any" value="3"></label>
-            <label>relax<input id="brushrelax" type="number" step="any" value="0.05"></label>
-            <label>dye<input id="brushdye" type="number" step="any" value="0"></label>
-          </div>
-          <p class="vnote">The brush takes its DIRECTION from the drag, which the
-          canvas mapping gives exactly, and its SPEED from this control. Pointer
-          events are wall-clock and the fluid runs in simulated seconds, and the
-          ratio between them varies by more than thirty times across these
-          scenarios &mdash; so "the fluid moves with your hand" needs an invented
-          constant, and this asks for it instead of hiding it.</p>
-          <div class="bcbuttons">
-            <button id="clearsources">Clear sources</button>
-          </div>
-        </div>
-        <dl>
-          <dt>placed</dt><dd id="srccount">-</dd>
-          <dt>brush</dt><dd id="srcbrush">-</dd>
-          <dt>dye released</dt><dd id="srcdye">-</dd>
-        </dl>
-        <div id="srclist"></div>
-      </div>
-
-      <div class="panel">
-        <h2>Flow analysis</h2>
-        <dl>
-          <dt>Reynolds (declared)</dt><dd id="fadeclared">-</dd>
-          <dt>Reynolds (peak speed)</dt><dd id="fapeak">-</dd>
-          <dt>peak shear rate</dt><dd id="fashear">-</dd>
-          <dt>peak wall shear</dt><dd id="fawall">-</dd>
-          <dt>separation points</dt><dd id="fasep">-</dd>
-          <dt>rotation vs strain</dt><dd id="farot">-</dd>
-          <dt>pressure range</dt><dd id="fadp">-</dd>
-          <dt>probe &Delta;p</dt><dd id="faprobedp">-</dd>
-        </dl>
-        <p class="vnote">The declared Reynolds number is an <em>input</em>: each
-        scenario picks it along with a reference speed and length and derives
-        &nu; from them, and a test asserts the three stay consistent. The peak
-        figure uses the same length with the fastest fluid actually present, so
-        it says how far the flow locally exceeds its nominal regime. Shear rate
-        is du/dy + dv/dx &mdash; vorticity is the same two derivatives
-        <em>subtracted</em>, so a shear layer is large in both and solid-body
-        rotation is large in one only. Wall shear is computed per face, where
-        the normal is exact; the <em>total</em> force on a body is withheld,
-        because summing over surface faces sums the staircase perimeter, which
-        is 4/&pi; times the true perimeter of a curved body at every resolution
-        and does not converge. Rotation is counted where it exceeds strain by a
-        stated margin rather than where Q &gt; 0, which is a coin flip in a
-        shear flow.</p>
-      </div>
-
-      <div class="panel">
-        <h2>Probes</h2>
-        <p class="drawstatus" id="probehover">-</p>
-        <div id="probelist"></div>
-        <dl>
-          <dt>pressure datum</dt><dd id="pdatum">-</dd>
-        </dl>
-        <div class="bcbuttons">
-          <button id="clearprobes">Clear probes</button>
-        </div>
-        <div class="bcedit">
-          <div class="bcfields">
-            <label>probe<select id="probepick" aria-label="Probe"></select></label>
-            <label>plot<select id="probequantity" aria-label="Quantity"></select></label>
-          </div>
-          <canvas id="probechart" width="560" height="240"></canvas>
-          <p id="probeaxis" class="vnote">-</p>
-        </div>
-        <p class="vnote">A probe reports the CELL under it, not an interpolated
-        point: u and v are averaged from that cell's own faces, vorticity from
-        its four corners. Sliding smoothly between cells would hide the
-        resolution, which is the thing most worth seeing. Pressure is shown with
-        its datum named &mdash; with no pressure boundary anywhere the solution
-        is only defined up to a constant, so the value at one cell means nothing
-        and the difference between two means everything. "cell Re" is
-        |u|h/&nu;, a property of this cell and the mesh; it is not the
-        scenario's Reynolds number. Samples are taken once per solver step, and
-        anything that rebuilds the field clears the history rather than joining
-        two runs into one curve.</p>
-      </div>
-
-      <div class="panel">
-        <h2>Geometry</h2>
-        <dl>
-          <dt>tool</dt><dd id="geomtool">-</dd>
-          <dt>shapes</dt><dd id="geomcount">-</dd>
-        </dl>
-        <div id="geomlist"></div>
+      <label class="check" style="margin-top:8px"><input type="checkbox" id="showregions" checked> tint disconnected regions</label>
+      <dl style="margin-top:10px">
+        <dt>tool</dt><dd id="geomtool">-</dd>
+        <dt>shapes</dt><dd id="geomcount">-</dd>
+      </dl>
+      <div id="geomlist"></div>
+      <details><summary>How drawing works</summary>
         <p class="vnote">Shapes are sampled onto the existing grid, so the
         highlight while you drag is the set of cells that will actually change
         &mdash; not the outline you drew. Editing the geometry stops the run and
         rebuilds the field from the scenario's initial condition: a domain that
         changes shape mid-flow is a moving-boundary problem this fixed-grid
         solver does not model.</p>
-      </div>
+      </details>
+    </section>
 
-      <div class="panel">
-        <h2>Dye tracer <span class="tag">visualization aid</span></h2>
-        <dl>
-          <dt>total dye</dt><dd id="dyetotal">-</dd>
-          <dt>not finite</dt><dd id="dyebroken">-</dd>
-          <dt>tracer CFL</dt><dd id="dyecfl">-</dd>
-          <dt>substeps</dt><dd id="dyesubsteps">-</dd>
-        </dl>
-        <p id="dyenote" class="vnote"></p>
-        <p class="vnote">Advected by the flow; feeds nothing back into it. Not a
-        solver state field.</p>
+    <section class="card">
+      <h2>Boundary conditions</h2>
+      <div id="bclist"></div>
+      <div class="bcedit">
+        <select id="bcside" aria-label="Side"></select>
+        <select id="bctype" aria-label="Boundary type"></select>
+        <div id="bcfields" class="bcfields"></div>
+        <div class="bcbuttons">
+          <button id="bcapply">Apply</button>
+          <button id="bcundo">Undo</button>
+          <button id="bcredo">Redo</button>
+        </div>
+        <p id="bcedithint" class="vnote"></p>
       </div>
+      <dl class="bcflux">
+        <dt>flux in</dt><dd id="bcflux">-</dd>
+        <dt>net</dt><dd id="bcnet">-</dd>
+        <dt>regions</dt><dd id="bcregions">-</dd>
+      </dl>
+      <details><summary>About the bands</summary>
+        <p class="vnote">Bands around the field show where each condition is
+        applied, drawn from the same compiled data the solver reads. Flux is
+        measured from the velocity field, positive into the domain; the net must
+        be zero for an incompressible domain.</p>
+      </details>
+    </section>
 
-      <div class="panel">
-        <h2>Continuity &amp; pressure solve</h2>
-        <dl>
-          <dt>continuity error</dt><dd id="divmax">-</dd>
-          <dt>rms</dt><dd id="divrms">-</dd>
-          <dt id="imposedlabel" hidden>imposed by sources</dt><dd id="imposed" hidden>-</dd>
-          <dt>poisson</dt><dd id="poisson">-</dd>
-          <dt>last solve</dt><dd id="poissonits">-</dd>
-        </dl>
-        <p id="divnote" class="vnote" hidden></p>
-        <p id="imposednote" class="vnote" hidden></p>
+    <section class="card">
+      <h2>Sources &amp; brush</h2>
+      <div class="bcfields">
+        <label>speed<input id="brushspeed" type="number" step="any" value="1.5"></label>
+        <label>radius<input id="brushradius" type="number" step="any" value="3"></label>
+        <label>relax<input id="brushrelax" type="number" step="any" value="0.05"></label>
+        <label title="Dye carried by a placed source; the brush itself leaves nothing behind">dye<input id="brushdye" type="number" step="any" value="0"></label>
       </div>
+      <div class="row"><button id="clearsources">Clear sources</button></div>
+      <dl style="margin-top:10px">
+        <dt>placed</dt><dd id="srccount">-</dd>
+        <dt>brush</dt><dd id="srcbrush">-</dd>
+        <dt>dye released</dt><dd id="srcdye">-</dd>
+      </dl>
+      <div id="srclist" class="srcrow"></div>
+      <details><summary>Why the speed is a control</summary>
+        <p class="vnote">The brush takes its DIRECTION from the drag, which the
+        canvas mapping gives exactly, and its SPEED from this control. Pointer
+        events are wall-clock and the fluid runs in simulated seconds, and the
+        ratio between them varies by more than thirty times across these
+        scenarios &mdash; so "the fluid moves with your hand" needs an invented
+        constant, and this asks for it instead of hiding it. The dye value is
+        carried only by placed sources: a brush stroke leaves nothing behind.</p>
+      </details>
+    </section>
 
-      <div class="panel">
-        <h2>Parameters</h2>
-        <dl>
-          <dt>&nu;</dt><dd id="nu">-</dd>
-          <dt>&rho;</dt><dd id="rho">-</dd>
-          <dt>&Delta;t</dt><dd id="dt">-</dd>
-          <dt>CFL / diff no.</dt><dd id="cfl">-</dd>
-          <dt>&Delta;t set by</dt><dd id="dtlimit">-</dd>
-          <dt>grid</dt><dd id="grid">-</dd>
-          <dt>Re</dt><dd id="re">-</dd>
-          <dt>peak speed</dt><dd id="peak">-</dd>
-        </dl>
+    <section class="card">
+      <h2>Fluid properties</h2>
+      <dl>
+        <dt>viscosity &nu;</dt><dd id="nu">-</dd>
+        <dt>density &rho;</dt><dd id="rho">-</dd>
+        <dt>Reynolds number</dt><dd id="re">-</dd>
+        <dt>peak speed</dt><dd id="peak">-</dd>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>Simulation settings</h2>
+      <dl>
+        <dt>solver</dt><dd>Chorin projection</dd>
+        <dt>grid</dt><dd>MAC staggered</dd>
+        <dt>resolution</dt><dd id="grid">-</dd>
+        <dt>CFL / diffusion</dt><dd id="cfl">-</dd>
+        <dt>&Delta;t set by</dt><dd id="dtlimit">-</dd>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>Dye tracer <span class="tag">visualization aid</span></h2>
+      <div class="row" style="margin-top:0">
+        <button id="reseed">Reseed dye</button>
+        <button id="cleardye">Clear dye</button>
+      </div>
+      <dl style="margin-top:10px">
+        <dt>total dye</dt><dd id="dyetotal">-</dd>
+        <dt>not finite</dt><dd id="dyebroken">-</dd>
+        <dt>tracer CFL</dt><dd id="dyecfl">-</dd>
+        <dt>substeps</dt><dd id="dyesubsteps">-</dd>
+      </dl>
+      <p id="dyenote" class="vnote"></p>
+      <p class="vnote">Advected by the flow; feeds nothing back into it. Not a
+      solver state field.</p>
+    </section>
+  </aside>
+
+  <!-- ============================================================ centre -->
+  <main class="stage">
+    <div id="banner" hidden></div>
+
+    <section class="card canvas-card">
+      <div class="canvas-head">
+        <span class="title" id="scenariotitle">-</span>
+        <!-- The live drawing status sits beside the canvas because it is read
+             WHILE dragging: four panels down a sidebar it was off-screen at
+             the one moment it matters. -->
+        <span id="drawstatus" class="drawstatus">-</span>
+      </div>
+      <div class="canvas-wrap"><canvas id="field"></canvas></div>
+      <div class="canvas-foot">
         <div class="legend">
+          <div class="legend-title"><span id="legendtitle">-</span><span class="sub2" id="legendsub"></span></div>
           <div id="legendbar"></div>
           <div class="ends">
             <span id="legendmin">-</span>
             <span id="legendmid"></span>
             <span id="legendmax">-</span>
           </div>
-          <p id="viewnote" class="vnote"></p>
+          <div class="key">
+            <span><i class="sw" style="background:#02040a;border-color:#e2e8f0"></i> solid</span>
+            <span><i class="sw" style="background:#ff00aa"></i> not finite</span>
+          </div>
         </div>
-        <div class="key">
-          <span><i class="sw" style="background:#333331"></i> solid</span>
-          <span><i class="sw" style="background:#ff00aa"></i> not finite</span>
+        <div class="foot-controls">
+          <label>colour map
+            <select id="colormap" aria-label="Colour map for magnitudes">
+              <option value="turbo">turbo</option>
+              <option value="viridis">viridis</option>
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" id="showcells"> show computed cells</label>
+        </div>
+        <div class="scalebar" title="The scenario's reference length">
+          <div id="scalebarline"></div>
+          <span id="scalebarlabel">-</span>
         </div>
       </div>
+    </section>
+
+    <section class="card">
+      <h2>Visualization mode</h2>
+      <div class="modes-row">
+        <div id="mode" class="modetiles" role="radiogroup" aria-label="Field shown"></div>
+        <div class="overlaytiles" role="group" aria-label="Overlays">
+          <label class="overlaytile" title="Arrows: direction everywhere, length by speed">
+            <input type="checkbox" id="showvectors">
+            <svg viewBox="0 0 60 26" aria-hidden="true"><g stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"><path d="M6 8h12m-4-3 4 3-4 3M26 8h12m-4-3 4 3-4 3M46 8h9m-3-3 3 3-3 3M6 19h12m-4-3 4 3-4 3M26 19h12m-4-3 4 3-4 3M46 19h9m-3-3 3 3-3 3"/></g></svg>
+            Vectors
+          </label>
+          <label class="overlaytile" title="Streamlines: tangent to the field at this instant">
+            <input type="checkbox" id="showstreamlines">
+            <svg viewBox="0 0 60 26" aria-hidden="true"><g stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"><path d="M2 6c14 0 18 7 28 7s14-7 28-7M2 13c14 0 18 5 28 5s14-5 28-5M2 20c14 0 18 3 28 3s14-3 28-3"/></g></svg>
+            Streamlines
+          </label>
+          <label class="overlaytile" title="Pathlines: where parcels of fluid have been">
+            <input type="checkbox" id="showpathlines">
+            <svg viewBox="0 0 60 26" aria-hidden="true"><g stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"><path d="M4 7h8M18 12h10M8 18h7M34 6h9M40 17h11M22 21h6M48 10h7"/></g></svg>
+            Pathlines
+          </label>
+        </div>
+      </div>
+      <div id="overlaynote" class="ctnote">-</div>
+    </section>
+
+    <div class="bottom-cards">
+      <section class="card">
+        <h2>Residuals</h2>
+        <canvas id="residualchart" class="chart" width="600" height="260"></canvas>
+        <p id="residualaxis" class="vnote">-</p>
+        <dl style="margin-top:8px">
+          <dt>continuity error</dt><dd id="divmax">-</dd>
+          <dt>rms</dt><dd id="divrms">-</dd>
+          <dt id="imposedlabel" hidden>imposed by sources</dt><dd id="imposed" hidden>-</dd>
+          <dt>pressure solve</dt><dd id="poisson">-</dd>
+          <dt>last solve</dt><dd id="poissonits">-</dd>
+          <dt>field</dt><dd id="fieldstate">-</dd>
+        </dl>
+        <p id="divnote" class="vnote" hidden></p>
+        <p id="imposednote" class="vnote" hidden></p>
+      </section>
+
+      <section class="card">
+        <h2>Monitor points</h2>
+        <div class="inline-selects">
+          <select id="probepick" aria-label="Probe"></select>
+          <select id="probequantity" aria-label="Quantity"></select>
+        </div>
+        <canvas id="probechart" class="chart" width="600" height="260"></canvas>
+        <p id="probeaxis" class="vnote">-</p>
+      </section>
+
+      <section class="card">
+        <h2>Quick metrics</h2>
+        <dl>
+          <dt>Re (declared)</dt><dd id="fadeclared">-</dd>
+          <dt>Re (peak speed)</dt><dd id="fapeak">-</dd>
+          <dt>peak shear rate</dt><dd id="fashear">-</dd>
+          <dt>peak wall shear</dt><dd id="fawall">-</dd>
+          <dt>separation</dt><dd id="fasep">-</dd>
+          <dt>rotation vs strain</dt><dd id="farot">-</dd>
+          <dt>pressure range</dt><dd id="fadp">-</dd>
+          <dt>probe &Delta;p</dt><dd id="faprobedp">-</dd>
+        </dl>
+        <details><summary>What these numbers are</summary>
+          <p class="vnote">The declared Reynolds number is an <em>input</em>: each
+          scenario picks it along with a reference speed and length and derives
+          &nu; from them, and a test asserts the three stay consistent. The peak
+          figure uses the same length with the fastest fluid actually present.
+          Shear rate is du/dy + dv/dx &mdash; vorticity is the same two
+          derivatives <em>subtracted</em>. Wall shear is computed per face, where
+          the normal is exact; the <em>total</em> force on a body is withheld,
+          because summing over surface faces sums the staircase perimeter, which
+          is 4/&pi; times the true perimeter of a curved body at every resolution
+          and does not converge. Rotation is counted where it exceeds strain by a
+          stated margin rather than where Q &gt; 0, which is a coin flip in a
+          shear flow.</p>
+        </details>
+      </section>
     </div>
-  </div>
+  </main>
+
+  <!-- ============================================================= right -->
+  <aside class="sidebar right">
+    <section class="card">
+      <h2>Probes <span class="spacer"></span><button id="addprobe" title="Arm the probe tool, then click the field">+ Add probe</button></h2>
+      <p class="drawstatus" id="probehover">-</p>
+      <div id="probelist"></div>
+      <dl style="margin-top:8px">
+        <dt>pressure datum</dt><dd id="pdatum">-</dd>
+      </dl>
+      <div class="row"><button id="clearprobes">Clear probes</button></div>
+      <details><summary>What a probe reports</summary>
+        <p class="vnote">A probe reports the CELL under it, not an interpolated
+        point: u and v are averaged from that cell's own faces, vorticity from
+        its four corners. Pressure is shown with its datum named &mdash; with no
+        pressure boundary anywhere the solution is only defined up to a
+        constant, so the value at one cell means nothing and the difference
+        between two means everything. "cell Re" is |u|h/&nu;, a property of
+        this cell and the mesh; it is not the scenario's Reynolds number.
+        Samples are taken once per solver step, and anything that rebuilds the
+        field clears the history rather than joining two runs into one curve.</p>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>Validation</h2>
+      <dl>
+        <dt>status</dt><dd id="vclass">-</dd>
+        <dt>meaning</dt><dd id="vmeans">-</dd>
+        <dt>reference</dt><dd id="vref">-</dd>
+        <dt>reference is</dt><dd id="vrefstatus">-</dd>
+      </dl>
+      <div id="vdetail"></div>
+    </section>
+
+    <section class="card">
+      <h2>Explanation</h2>
+      <p id="note"></p>
+      <p id="viewnote" class="vnote"></p>
+    </section>
+  </aside>
+
+  <!-- ============================================================ status -->
+  <footer class="statusbar">
+    <span class="chip" id="statechip" data-state="paused">paused</span>
+    <span>CPU &middot; JavaScript &middot; MAC staggered grid &middot; Chorin projection</span>
+    <span class="grow"></span>
+    <span>Performance: <b id="perf">-</b></span>
+  </footer>
 </div>
 <script type="module">
   import { Harness } from "./ui/harness.js";

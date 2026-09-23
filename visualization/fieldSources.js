@@ -29,7 +29,9 @@ import { continuityErrorAt } from "../solver/ns2d.js";
 //   cylinder          0.687    0.360   121 (1.00%)         1.9x
 //   cavity            0.587    0.073    40 (0.98%)         8.1x
 const PRESSURE_CLIP = 0.99;
-import { sampleRamp, sampleDiverging, sampleDye } from "./colormap.js";
+import {
+  DEFAULT_MAGNITUDE_RAMP, MAGNITUDE_RAMPS, sampleDiverging, sampleDye,
+} from "./colormap.js";
 
 // A scale is NaN-poisoned rather than defaulted when the field is not usable.
 // Every normalise() below divides by it, so a broken field yields NaN for
@@ -51,12 +53,18 @@ const VELOCITY = {
     // scales to 1 and paints uniformly at the bottom of the ramp rather than
     // dividing by zero.
     const hi = summary.finite ? (summary.max > 0 ? summary.max : 1) : NaN;
+    // The magnitude ramp is the viewer's choice between turbo and viridis; see
+    // visualization/colormap.js for what each costs. An unknown name falls
+    // back to the default rather than to nothing, so a stale setting cannot
+    // leave the field unpainted.
+    const palette = MAGNITUDE_RAMPS[context.palette] ?? MAGNITUDE_RAMPS[DEFAULT_MAGNITUDE_RAMP];
     return {
       valueAt,
       summary,
       scale: { lo: 0, hi, centre: null, diverging: false },
       normalise: (value) => value / hi,
-      ramp: sampleRamp,
+      ramp: palette.sample,
+      paletteNote: palette.note,
     };
   },
 };

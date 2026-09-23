@@ -38,7 +38,11 @@ import { sourcePlanFor } from "../sources/compile.js";
 import { SolverStabilityError } from "../solver/stability.js";
 import { inspectField } from "../physics/fieldStats.js";
 import { FieldRenderer } from "../visualization/fieldRenderer.js";
-import { samplerCss } from "../visualization/colormap.js";
+import {
+  DEFAULT_MAGNITUDE_RAMP, MAGNITUDE_RAMPS, samplerCss,
+  sampleDiverging as sampleDivergingRamp, sampleDye as sampleDyeRamp,
+} from "../visualization/colormap.js";
+import { drawSurfaceOutline } from "../visualization/surfaceOutline.js";
 import {
   drawBoundaryOverlay, boundaryLegend, measureBoundaryFlux,
 } from "../visualization/boundaryOverlay.js";
@@ -57,7 +61,7 @@ import {
 } from "../visualization/flowOverlay.js";
 import { traceStreamlines } from "../physics/streamlines.js";
 import { analyseFlow, pressureDropBetween } from "../physics/flowAnalysis.js";
-import { drawSeries } from "../visualization/timeseries.js";
+import { drawSeries, seriesRange } from "../visualization/timeseries.js";
 import { describeSource } from "../sources/kinds.js";
 import {
   prepareView,
@@ -70,7 +74,7 @@ import {
   assessField, classifyRunFailure, isUnprojectedInitialCondition,
 } from "./fieldHealth.js";
 import { ValidationPanel } from "./validationPanel.js";
-import { exponential, fixed, integer, isBad } from "./format.js";
+import { compact, exponential, fixed, integer, isBad } from "./format.js";
 
 // Where a sample was taken, and what it says. Split so the probe list can put
 // them on separate lines while the hover readout keeps them on one.
@@ -95,6 +99,46 @@ function describeValues(sample) {
 function escapeHtml(text) {
   return String(text).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
+
+// The intrinsic canvas width the scale is fitted to, and the largest number of
+// canvas pixels a cell may take. 960 matches the centre column of the layout
+// at common widths; 14 keeps the 64x64 cavity to a square under 900 pixels.
+const TARGET_WIDTH = 960;
+const MAX_SCALE = 14;
+
+// Short names for the mode tiles. The views' own labels are written for the
+// legend, where there is room to say what they are.
+const TILE_LABELS = {
+  velocity: "Velocity",
+  pressure: "Pressure",
+  vorticity: "Vorticity",
+  shear: "Shear rate",
+  q: "Rotation (\u221aQ)",
+  continuity: "Continuity",
+  dye: "Dye",
+};
+
+// Which ramp a view is drawn in, without preparing it. Used for the tile
+// swatches; the renderer takes its ramp from the prepared view itself.
+function rampForView(id, palette) {
+  const source = FIELD_SOURCES.find((entry) => entry.id === id);
+  if (source === undefined) return MAGNITUDE_RAMPS[DEFAULT_MAGNITUDE_RAMP].sample;
+  if (id === "velocity") return (MAGNITUDE_RAMPS[palette] ?? MAGNITUDE_RAMPS[DEFAULT_MAGNITUDE_RAMP]).sample;
+  if (id === "dye") return sampleDyeRamp;
+  return sampleDivergingRamp;
+}
+
+// Tool icons, as SVG path markup. Static strings owned by this file.
+const TOOL_ICONS = {
+  select: '<path d="M3 2l9 5-4 1-1 4z"/>',
+  rectangle: '<rect x="2.5" y="4" width="11" height="8" rx="1"/>',
+  circle: '<circle cx="8" cy="8" r="5.5"/>',
+  eraseRectangle: '<rect x="2.5" y="4" width="11" height="8" rx="1" stroke-dasharray="2 2"/><path d="M5 6l6 4M11 6l-6 4"/>',
+  eraseCircle: '<circle cx="8" cy="8" r="5.5" stroke-dasharray="2 2"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5"/>',
+  brush: '<path d="M2 12c3 0 3-3 6-3s3 3 6 3"/><path d="M10 4l3 3"/>',
+  placeSource: '<circle cx="8" cy="8" r="2"/><path d="M8 2v2M8 12v2M2 8h2M12 8h2"/>',
+  probe: '<circle cx="7" cy="7" r="4"/><path d="M10 10l4 4"/>',
+};
 
 const STEPS_PER_FRAME = 4;
 const FRAME_BUDGET_MS = 24;
@@ -140,6 +184,14 @@ export class Harness {
     // #showregions already is.
     this.overlays = { vectors: false, streamlines: false, pathlines: false };
     this.overlayCounts = null;
+    // Display quality. Smooth rendering is the default because a
+    // higher-quality fluid picture was asked for; the computed cells are one
+    // checkbox away, because seeing the resolution the answer was computed at
+    // is still worth something. See visualization/fieldRenderer.js.
+    this.smooth = true;
+    this.palette = DEFAULT_MAGNITUDE_RAMP;
+    // Frames and steps per second, for the status bar.
+    this.perf = { frames: 0, steps: 0, since: performance.now(), fps: null, sps: null };
     // Probe display state. The probes themselves live in the session, which is
     // what samples them; these three are only about what is being looked at.
     this.hoverPoint = null;
@@ -198,15 +250,45 @@ export class Harness {
       this.load(this.scenarioId);
     });
 
+    // Tiles rather than a dropdown, after the reference. Built from the table
+    // of field sources, so a view added to visualization/fieldSources.js
+    // appears here without anyone editing the markup - and each tile's swatch
+    // is painted from that view's own ramp, so the tile shows the colours the
+    // field will be drawn in rather than an icon that could drift from them.
     const mode = root.querySelector("#mode");
     for (const source of FIELD_SOURCES) {
-      const option = document.createElement("option");
-      option.value = source.id;
-      option.textContent = source.label;
-      mode.appendChild(option);
+      const tile = document.createElement("button");
+      tile.type = "button";
+      tile.className = "modetile";
+      tile.dataset.mode = source.id;
+      tile.setAttribute("role", "radio");
+      tile.title = source.label;
+      const swatch = document.createElement("span");
+      swatch.className = "swatch";
+      swatch.dataset.swatchFor = source.id;
+      const label = document.createElement("span");
+      label.textContent = TILE_LABELS[source.id] ?? source.label;
+      tile.append(swatch, label);
+      tile.addEventListener("click", () => this.setMode(source.id));
+      mode.appendChild(tile);
     }
-    mode.value = this.mode;
-    mode.addEventListener("change", () => this.setMode(mode.value));
+    this.syncModeTiles();
+
+    const colormap = root.querySelector("#colormap");
+    colormap.value = this.palette;
+    colormap.addEventListener("change", () => {
+      if (!(colormap.value in MAGNITUDE_RAMPS)) return;
+      this.palette = colormap.value;
+      this.syncModeTiles();
+      this.draw();
+    });
+    const cells = root.querySelector("#showcells");
+    cells.checked = !this.smooth;
+    cells.addEventListener("change", () => {
+      this.smooth = !cells.checked;
+      root.querySelector("#field").classList.toggle("cells", !this.smooth);
+      this.draw();
+    });
 
     this.bindDrawingControls();
     this.bindBoundaryControls();
@@ -339,7 +421,14 @@ export class Harness {
       const button = document.createElement("button");
       button.className = "tool";
       button.dataset.tool = id;
-      button.textContent = tool.label;
+      button.title = tool.hint ?? tool.label;
+      // An icon beside the label, as in the reference's tool list. Built as
+      // markup the harness owns - none of it comes from outside the app.
+      button.innerHTML =
+        `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" ` +
+        `stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+        `${TOOL_ICONS[id] ?? TOOL_ICONS.select}</svg>`;
+      button.append(tool.label);
       button.addEventListener("click", () => this.setTool(id));
       tools.appendChild(button);
     }
@@ -485,6 +574,11 @@ export class Harness {
       this.draw();
     });
 
+    // Arms the probe tool, as the reference's "+ Add Probe" does. Pinning still
+    // happens by clicking the field: a probe is a PLACE, and a button cannot
+    // say where.
+    root.querySelector("#addprobe").addEventListener("click", () => this.setTool("probe"));
+
     root.querySelector("#clearprobes").addEventListener("click", () => {
       if (!this.session.clearProbes()) return;
       this.probeSelection = null;
@@ -625,7 +719,24 @@ export class Harness {
   // assumed in tests/test9_m3_visualization.js.
   setMode(id) {
     this.mode = id;
+    this.syncModeTiles();
     this.draw();
+  }
+
+  // The selected tile, and every tile's swatch painted from the ramp its view
+  // will actually use - including the magnitude ramp the viewer picked.
+  syncModeTiles() {
+    for (const tile of this.root.querySelectorAll("#mode .modetile")) {
+      const on = tile.dataset.mode === this.mode;
+      tile.setAttribute("aria-checked", on ? "true" : "false");
+      tile.tabIndex = on ? 0 : -1;
+    }
+    for (const swatch of this.root.querySelectorAll("#mode .swatch")) {
+      const ramp = rampForView(swatch.dataset.swatchFor, this.palette);
+      const stops = [];
+      for (let k = 0; k <= 12; k++) stops.push(`${samplerCss(ramp, k / 12)} ${(k / 12) * 100}%`);
+      swatch.style.background = `linear-gradient(90deg, ${stops.join(", ")})`;
+    }
   }
 
   // Cancels the animation loop without drawing. load() needs this because
@@ -685,11 +796,17 @@ export class Harness {
     reseed.title = this.tracerConfig.note;
     this.root.querySelector("#dyenote").textContent = this.tracerConfig.note;
 
+    // Sized to the wider centre column of the new layout. The cap stops a
+    // small grid from producing a canvas several screens tall; the smooth
+    // renderer covers the extra pixels per cell by interpolation rather than
+    // by enlarging blocks.
     const canvas = this.root.querySelector("#field");
-    const scale = Math.max(1, Math.min(9, Math.floor((760 - 2 * MARGIN) / grid.nx)));
+    const scale = Math.max(1, Math.min(MAX_SCALE, Math.floor((TARGET_WIDTH - 2 * MARGIN) / grid.nx)));
     this.scale = scale;
     canvas.width = grid.nx * scale + 2 * MARGIN;
     canvas.height = grid.ny * scale + 2 * MARGIN;
+    canvas.classList.toggle("cells", !this.smooth);
+    this.root.querySelector("#scenariotitle").textContent = this.scenario.label;
   }
 
   // Dye controls only ever touch the tracer. They do not reset the run: the
@@ -711,6 +828,9 @@ export class Harness {
     if (this.state === "failed") return; // only Reset clears a failure
     if (this.state === "running") return;
     this.state = "running";
+    this.perf.frames = 0;
+    this.perf.steps = 0;
+    this.perf.since = performance.now();
     this.tick();
   }
 
@@ -727,12 +847,14 @@ export class Harness {
     // The timestep is chosen from the field before every step, not fixed for
     // the run. A stability failure is an exception, not a status code, so it
     // is caught here and turned into the same hard stop as a non-finite field.
+    let stepsThisFrame = 0;
     try {
       for (let n = 0; n < STEPS_PER_FRAME; n++) {
         // One session step: it chooses the timestep from the field, runs the
         // solver, and advects the tracer on the field the solver just
         // produced. It refuses outright if the geometry moved underneath it.
         this.session.advance();
+        stepsThisFrame++;
         if (performance.now() - started > FRAME_BUDGET_MS) break;
       }
     } catch (error) {
@@ -755,7 +877,27 @@ export class Harness {
     }
 
     this.draw();
+    this.countFrame(stepsThisFrame);
     if (this.state === "running") this.frame = requestAnimationFrame(() => this.tick());
+  }
+
+  // Frames and solver steps per second over the last second of running, for
+  // the status bar. Measured, not configured: the harness asks for four steps
+  // a frame and takes fewer when a step is slow, so the number that matters is
+  // the one that happened.
+  countFrame(steps) {
+    const perf = this.perf;
+    perf.frames++;
+    perf.steps += steps;
+    const now = performance.now();
+    const elapsed = now - perf.since;
+    if (elapsed >= 1000) {
+      perf.fps = (perf.frames * 1000) / elapsed;
+      perf.sps = (perf.steps * 1000) / elapsed;
+      perf.frames = 0;
+      perf.steps = 0;
+      perf.since = now;
+    }
   }
 
   draw() {
@@ -792,6 +934,7 @@ export class Harness {
       tracer: this.tracer,
       sources: this.sourcePlan,
       divergenceTol: this.scenario.params.divergenceTol,
+      palette: this.palette,
     });
     // The preview and the region overlay are drawn through the renderer's tint
     // hook, inside the loop that already visits every cell, and the count of
@@ -800,8 +943,16 @@ export class Harness {
     // disagree with the one the user is looking at.
     const pending = this.drawing.pending;
     const counter = { changing: 0 };
-    this.renderer.render(grid, view, MARGIN, this.composeTint(grid, counter));
+    this.renderer.render(grid, view, MARGIN, this.composeTint(grid, counter), {
+      smooth: this.smooth,
+      scale: this.scale,
+    });
     this.previewSummary = pending === null ? null : { operation: pending, changing: counter.changing };
+    // The wall, as a line along the faces the solver treats as surface. Drawn
+    // before the bands and overlays so neither is hidden under it.
+    drawSurfaceOutline(this.renderer.context, grid, {
+      originX: MARGIN, originY: MARGIN, scale: this.scale, h: grid.h, ny: grid.ny,
+    }, { width: Math.max(1, Math.min(2, this.scale / 4)) });
     drawBoundaryOverlay(this.renderer.context, this.plan, {
       originX: MARGIN,
       originY: MARGIN,
@@ -833,7 +984,7 @@ export class Harness {
     set("#nu", exponential(params.nu, 3));
     set("#rho", fixed(params.rho, 1));
     const sel = this.lastSelection;
-    set("#dt", sel ? exponential(sel.dt, 3) : "chosen per step");
+    set("#dt", sel ? compact(sel.dt) : "per step");
     set("#cfl", sel ? `${fixed(sel.cflNumber, 3)} / ${fixed(sel.diffusionNumber, 3)}` : "-");
     set("#dtlimit", sel ? sel.limitedBy : "-");
     set("#grid", `${grid.nx} x ${grid.ny}  (h = ${exponential(grid.h, 2)})`);
@@ -879,6 +1030,17 @@ export class Harness {
     }
 
     set("#status", this.state.toUpperCase(), this.state === "failed");
+    const chip = root.querySelector("#statechip");
+    chip.dataset.state = this.state;
+    chip.textContent = this.state;
+    const perf = this.perf;
+    set(
+      "#perf",
+      this.state === "running" && perf.fps !== null
+        ? `${fixed(perf.fps, 0)} fps \u00b7 ${fixed(perf.sps, 0)} steps/s`
+        : "-"
+    );
+    this.drawResidualChart();
     root.querySelector("#run").disabled = this.state !== "paused";
     root.querySelector("#pause").disabled = this.state !== "running";
 
@@ -924,11 +1086,17 @@ export class Harness {
       node.classList.toggle("bad", bad);
     };
 
+    // The ARMED tool, not the drawing controller's. The controller is parked
+    // on "select" whenever a tool that makes no geometry is armed - the brush,
+    // the source placer, the probe - so reading it here highlighted Select
+    // while the brush was the thing a click would use. Wrong since M6, and
+    // found only when a check asserted what the tool list shows.
+    const armed = this.pointerTool;
     for (const button of root.querySelectorAll("#tools .tool")) {
-      button.classList.toggle("on", button.dataset.tool === this.drawing.tool);
+      button.classList.toggle("on", button.dataset.tool === armed);
     }
 
-    set("#geomtool", DRAW_TOOLS[this.drawing.tool].label);
+    set("#geomtool", DRAW_TOOLS[armed].label);
     const count = session.editor.size;
     set("#geomcount", count === 0 ? "none" : integer(count));
 
@@ -1127,8 +1295,12 @@ export class Harness {
       const trails = this.session.pathlines.particles
         .map((particle) => particle.trail)
         .filter((trail) => trail.length >= 2);
+      // Near-white rather than the yellow they were: yellow sat on top of the
+      // brightest part of the turbo ramp and was the "sharp" colour the UI
+      // refresh was asked to remove. Faded towards the tail so the direction
+      // of travel is readable without an arrowhead on every parcel.
       counts.pathlines = drawPolylines(context, trails, placement, {
-        colour: "rgba(255,241,118,0.85)", width: 1.1, fade: true,
+        colour: "rgba(248,250,252,0.82)", width: 1.2, fade: true,
       });
     }
 
@@ -1142,7 +1314,7 @@ export class Harness {
         ds: grid.h / 2,
       });
       counts.streamlines = drawPolylines(context, lines, placement, {
-        colour: "rgba(255,255,255,0.62)", width: 1,
+        colour: "rgba(255,255,255,0.78)", width: 1.2,
       });
     }
 
@@ -1663,21 +1835,32 @@ export class Harness {
       node.classList.toggle("bad", bad);
     };
 
+    this.updateScaleBar();
     if (!view) {
+      set("#legendtitle", "-");
+      set("#legendsub", "");
       set("#legendmin", "-");
       set("#legendmid", "");
       set("#legendmax", "-");
       set("#viewnote", "This view is not available for the current state.");
       return;
     }
+    set("#legendtitle", view.label);
+    set(
+      "#legendsub",
+      view.scale.fixed ? "fixed scale" : view.scale.diverging ? "centred on zero" : this.mode === "velocity" ? this.palette : ""
+    );
 
     // Same rule as the peak readout: a scale drawn from a partly broken field
     // is not a scale anyone should read a value off, and prepareView hands
     // back NaN bounds rather than the survivors' range when that happens.
     const { lo, hi, centre, clipped, breached } = view.scale;
-    set("#legendmin", exponential(lo, 2), isBad(lo));
-    set("#legendmid", centre === null ? "" : exponential(centre, 2));
-    set("#legendmax", exponential(hi, 2), isBad(hi));
+    set("#legendmin", compact(lo), isBad(lo));
+    // The midpoint is printed for every scale now, not only centred ones: a
+    // three-tick legend reads far more easily than a two-tick one, and for a
+    // sequential scale the middle is simply the average of the ends.
+    set("#legendmid", centre === null ? compact((lo + hi) / 2) : compact(centre));
+    set("#legendmax", compact(hi), isBad(hi));
 
     // A clipped scale must SAY it is clipped, and say what it left out.
     //
@@ -1710,7 +1893,91 @@ export class Harness {
           `${exponential(breached.worst, 2)}. That is the projection failing to deliver ` +
           `what it promises, not a scaling choice.`;
     }
-    set("#viewnote", view.note + clipNote + boundNote,
+    const paletteNote = view.paletteNote ? ` ${view.paletteNote}` : "";
+    set("#viewnote", view.note + clipNote + boundNote + paletteNote,
       Boolean(breached && breached.cells > 0));
+  }
+
+  // A bar the length of the scenario's own reference length - the cylinder's
+  // diameter, the duct's width - drawn at the scale the canvas is displayed
+  // at. Physical units are not claimed: this solver is non-dimensional, and
+  // the reference length is the unit its Reynolds number is built from.
+  updateScaleBar() {
+    const line = this.root.querySelector("#scalebarline");
+    const label = this.root.querySelector("#scalebarlabel");
+    const reference = this.scenario.reference;
+    const canvas = this.root.querySelector("#field");
+    const rect = canvas.getBoundingClientRect();
+    if (!reference || rect.width === 0) {
+      line.style.width = "0px";
+      label.textContent = "-";
+      return;
+    }
+    const cssPerUnit = (this.scale / this.scenario.grid.h) * (rect.width / canvas.width);
+    line.style.width = `${Math.max(8, reference.L * cssPerUnit)}px`;
+    label.textContent = `${reference.length} = ${compact(reference.L)}`;
+  }
+
+  // The continuity error after every solver step, on a log axis with the
+  // solver's tolerance drawn across it. One series: the projection is the only
+  // part of this method that iterates to a tolerance, so there is no momentum
+  // residual to plot - see ui/residuals.js.
+  drawResidualChart() {
+    const canvas = this.root.querySelector("#residualchart");
+    const note = this.root.querySelector("#residualaxis");
+    const context = canvas.getContext("2d");
+    const { width, height } = canvas;
+    const history = this.session.residuals;
+    const tolerance = this.scenario.params.divergenceTol;
+    const series = history.series("continuity");
+    // A FIXED log axis from four decades below the bound to three above it,
+    // so the bound sits a little over halfway up. Fitted to the data this
+    // chart was a scribble: every step converges TO the tolerance, so the
+    // series spans a fifth of a decade and its rounding noise filled the whole
+    // height - the continuity view's mistake, made again one panel over.
+    const bound = Number.isFinite(tolerance) && tolerance > 0 ? tolerance : 1e-7;
+    const axis = { lo: bound * 1e-4, hi: bound * 1e3 };
+    const layout = drawSeries(context, series, {
+      width, height, padding: 12, colour: "#60a5fa", background: "#0a101b", log: true,
+      lineWidth: 1.6, range: axis,
+    });
+    if (layout.points === 0) {
+      note.textContent = history.length === 0
+        ? "no steps yet - press Run"
+        : `${integer(history.length)} steps, none plottable on a log axis`;
+      note.classList.remove("bad");
+      return;
+    }
+    // The tolerance line.
+    const { lo, hi } = layout.range;
+    const measured = seriesRange(series.value);
+    if (hi > lo) {
+      const top = 12;
+      const bottom = height - 12;
+      const y = bottom - ((Math.log10(bound) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo))) * (bottom - top);
+      if (y >= top - 1 && y <= bottom + 1) {
+        context.save();
+        context.setLineDash([6, 5]);
+        context.strokeStyle = "rgba(240, 93, 122, 0.8)";
+        context.lineWidth = 1.5;
+        context.beginPath();
+        context.moveTo(12, y);
+        context.lineTo(width - 12, y);
+        context.stroke();
+        context.restore();
+      }
+    }
+    const latest = history.latest();
+    const parts = [
+      `max|div u - q| per step: ${compact(measured.lo)} to ${compact(measured.hi)}`,
+      `bound ${compact(bound)} dashed, axis ${compact(lo)}-${compact(hi)} (log)`,
+      `steps ${integer(layout.span.t0)}-${integer(layout.span.t1)}`,
+    ];
+    if (layout.clipped > 0) parts.push(`${integer(layout.clipped)} beyond the axis, drawn at its edge`);
+    if (layout.unplottable > 0) parts.push(`${integer(layout.unplottable)} exact zeros not shown on a log axis`);
+    if (layout.range.nonFinite > 0) parts.push(`${integer(layout.range.nonFinite)} NOT FINITE`);
+    if (latest && Number.isFinite(latest.poisson)) parts.push(`last solve ${integer(latest.poisson)} CG iterations`);
+    note.textContent = parts.join("  -  ");
+    note.classList.toggle("bad", layout.range.nonFinite > 0 || measured.hi > bound);
   }
 }

@@ -61,6 +61,7 @@ import { computeStableTimestep } from "../solver/stability.js";
 import { sourcePlanFor } from "../sources/compile.js";
 import { combineSources } from "./brush.js";
 import { ProbeSet } from "./probes.js";
+import { ResidualHistory } from "./residuals.js";
 import { validateSource } from "../sources/kinds.js";
 import { buildScenario } from "../scenarios/index.js";
 
@@ -85,6 +86,7 @@ export class SimulationSession {
     this.#rebuildSources();
     // Created before reset(), which clears their history.
     this.probes = new ProbeSet();
+    this.residuals = new ResidualHistory();
     this.reset();
   }
 
@@ -236,6 +238,9 @@ export class SimulationSession {
     // The probes stay pinned; what they read does not survive a field that was
     // replaced rather than advanced. See the note at the top of ui/probes.js.
     this.probes.clearHistory();
+    // Same rule as the probes: a convergence history drawn across a rebuild
+    // would join two different solves into one line.
+    this.residuals.clear();
 
     this.iteration = 0;
     this.simulatedTime = 0;
@@ -360,6 +365,7 @@ export class SimulationSession {
     this.lastStep = step(grid, bc, { ...params, dt: selection.dt, sources });
     this.iteration++;
     this.simulatedTime += selection.dt;
+    this.residuals.record(this.iteration, this.lastStep);
     // Sampled here, inside the step, rather than in the harness's draw(). The
     // harness runs up to four steps per frame, so sampling on repaint would
     // keep one reading in four and alias anything varying near the step rate.

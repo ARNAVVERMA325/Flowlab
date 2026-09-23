@@ -22,6 +22,13 @@ Read this before starting any implementation session.
    drawn as one screen, and knowing where a milestone is heading is different from
    shipping it early.
 
+   **Overridden once, explicitly, after M9.** The user asked for the UI to be rebuilt
+   after `ui-reference.png` and for the reference's colours. That is the owner of this
+   rule changing it for one piece of work, not the rule lapsing: the layout, the colour
+   ramps and the rendering were rebuilt to the reference, and the reference features
+   that need milestones not yet built (the equation explorer, turbulent kinetic energy,
+   file operations) were left out rather than mocked up. See `docs/UI-refresh.md`.
+
    Spelled out because the ambiguity cost something. Through M0-M6 these were never
    opened at all, on a reading of "do not implement" as "do not look" - and the pressure
    view was auto-fitted to its extreme for four milestones while `visualisation-reference.png`

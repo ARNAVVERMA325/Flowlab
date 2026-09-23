@@ -59,10 +59,21 @@ const TRACKED = Object.keys(PROBE_QUANTITIES);
 // about: eight arrays of this length per probe is 192 KB.
 export const PROBE_CAPACITY = 3000;
 
-// Distinct marker colours, cycled. Chosen to stay legible against both ends of
-// the velocity ramp and against the solid colour.
+// Marker colours. A probe's colour is an IDENTITY, so this is a categorical
+// palette and is held to the categorical checks rather than picked by eye: the
+// dark-mode slots of the validated default palette, in its fixed order, run
+// through the palette validator against this UI's panel surface (#0e1522).
+// All eight pass on adjacent pairs (worst CVD delta-E 8.4, normal-vision
+// 19.3, every slot at least 3:1); the first three also pass all-pairs, which
+// is the test that applies to markers scattered over a field. Past three, a
+// probe's P-label is always drawn beside its marker - the secondary encoding
+// the palette's rules require - so identity is never carried by colour alone.
+//
+// Assigned in order and never cycled back to a colour already on screen while
+// fewer than eight are pinned.
 export const PROBE_COLOURS = [
-  "#4fc3f7", "#ffb74d", "#ba68c8", "#81c784", "#ff8a80", "#fff176",
+  "#3987e5", "#d95926", "#199e70", "#c98500",
+  "#d55181", "#008300", "#9085e9", "#e66767",
 ];
 
 // A fixed-length history. Writes wrap; reads come back oldest first.

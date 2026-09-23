@@ -45,6 +45,33 @@ async function withApp(body) {
   }
 }
 
+// Views are chosen with the mode TILES now, after the reference layout, rather
+// than a dropdown. A click on the tile a person would click, not a call into
+// setMode - and no catch, so a missing tile fails rather than timing out into
+// a pass.
+async function chooseMode(page, mode) {
+  await page.click(`#mode .modetile[data-mode="${mode}"]`);
+  await page.waitForTimeout(150);
+  const chosen = await page.evaluate(() => window.__flowlab.mode);
+  if (chosen !== mode) throw new Error(`clicking the ${mode} tile left the view on ${chosen}`);
+}
+
+// Runs until at least `steps` SOLVER STEPS have happened, then pauses.
+//
+// For checks whose claim is about steps - one sample per step, trails that
+// grow per step, a fluid that responds within N steps. Waiting a fixed number
+// of milliseconds instead ties the verdict to how fast the machine renders:
+// after the UI refresh made frames heavier, the brush check began failing
+// intermittently for exactly that reason, and three others were one slow CI
+// runner away from the same.
+async function runForSteps(page, steps, timeout = 60000) {
+  const from = await page.evaluate(() => window.__flowlab.session.iteration);
+  await page.click("#run");
+  await page.waitForFunction((target) => window.__flowlab.session.iteration >= target, from + steps, { timeout });
+  await page.click("#pause");
+  await page.waitForTimeout(100);
+}
+
 describe("browser", { skip }, () => {
   // -------------------------------------------------------------------------
   // The run loop and the failure states
@@ -309,11 +336,23 @@ describe("browser", { skip }, () => {
       assert.equal(stroking.solver.brushLive, true);
       assert.match(stroking.panel.srcbrush, /^pushing/);
 
-      await page.waitForTimeout(700);
+      // Wait for SOLVER STEPS with the brush held, not for wall-clock time.
+      //
+      // This waited 700 ms and failed intermittently after the UI refresh made
+      // each frame heavier: fewer steps fitted into the same 700 ms, so the
+      // fluid had less simulated time to respond, and the check's verdict
+      // depended on how fast the machine rendered rather than on whether the
+      // brush pushes. The physics claim is per step, so the wait is too.
+      const startedAt = stroking.solver.iteration;
+      await page.waitForFunction(
+        (from) => window.__flowlab.session.iteration >= from + 40,
+        startedAt, { timeout: 30000 }
+      );
       const during = await readState(page);
       assert.ok(
         during.solver.peakSpeed > before.solver.peakSpeed * 1.2,
-        `the stroke must move the fluid: ${before.solver.peakSpeed} -> ${during.solver.peakSpeed}`
+        `the stroke must move the fluid within 40 steps: ${before.solver.peakSpeed} -> ` +
+        `${during.solver.peakSpeed} over ${during.solver.iteration - startedAt} steps`
       );
       assert.ok(Number(during.panel.divmax) <= 1e-7, "and the projection must still hold");
 
@@ -667,12 +706,10 @@ describe("browser", { skip }, () => {
       assert.equal(pinned.solver.probeSamples, 0, "pinning is not a measurement");
       assert.match(pinned.panel.probeaxis, /no samples yet/);
 
-      await page.click("#run");
-      await page.waitForTimeout(2000);
-      await page.click("#pause");
+      await runForSteps(page, 60);
 
       const ran = await readState(page);
-      assert.ok(ran.solver.iteration > 50, `only ${ran.solver.iteration} steps ran`);
+      assert.ok(ran.solver.iteration >= 60, `only ${ran.solver.iteration} steps ran`);
       assert.equal(
         ran.solver.probeSamples, ran.solver.iteration,
         "one sample per solver step - a sample taken on repaint would be about a quarter of these"
@@ -962,9 +999,7 @@ describe("browser", { skip }, () => {
       // on shows a trail instead of starting to grow one.
       assert.ok(await trails() < 1.5, "a fresh field has no history yet");
 
-      await page.click("#run");
-      await page.waitForTimeout(2500);
-      await page.click("#pause");
+      await runForSteps(page, 20);
       const grown = await trails();
       assert.ok(grown > 5, `trails averaged ${grown} points after a run`);
 
@@ -999,8 +1034,8 @@ describe("browser", { skip }, () => {
       await page.waitForTimeout(2500);
       await page.click("#pause");
 
-      await page.selectOption("#mode", "continuity");
-      await page.waitForTimeout(300);
+      await chooseMode(page, "continuity");
+      await page.waitForTimeout(150);
       const state = await readState(page);
       assert.equal(state.solver.mode, "continuity");
       assert.match(state.panel.viewnote, /inside the bound/);
@@ -1009,41 +1044,40 @@ describe("browser", { skip }, () => {
       // How far the painted field actually strays from the centre colour. A
       // near-uniform picture is the correct one here; anything else is the
       // solver's rounding noise dressed as structure.
-      const spread = await page.evaluate(() => {
+      // Distances are measured from the diverging ramp's own centre colour,
+      // read from the module the renderer uses. The first version hardcoded
+      // the old ramp's dark centre, which silently stops meaning anything the
+      // moment the ramp changes - and the UI refresh changed it.
+      const measure = () => page.evaluate(async () => {
+        const { sampleDiverging, SOLID_COLOUR } = await import("./visualization/colormap.js");
+        const centre = sampleDiverging(0.5);
         const c = document.querySelector("#field");
         const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
-        const centre = [0x2a, 0x2a, 0x28];   // the diverging ramp's middle stop
+        const layout = window.__flowlab.layout();
+        const g = window.__flowlab.scenario.grid;
         let worst = 0;
-        for (let i = 0; i < d.length; i += 4) {
-          const away = Math.max(
-            Math.abs(d[i] - centre[0]), Math.abs(d[i + 1] - centre[1]),
-            Math.abs(d[i + 2] - centre[2])
-          );
-          if (away > worst) worst = away;
-        }
-        return worst;
-      });
-      // The margin, the bands and the solid body are all far from the centre
-      // colour, so this cannot be tight - but a saturated field reaches 200+
-      // and the earlier broken version did exactly that across the whole
-      // domain. Measured as a fraction of cells instead would be tighter; this
-      // is the crude version that a rebuild of the scale cannot sneak past.
-      const fractionOff = await page.evaluate(() => {
-        const c = document.querySelector("#field");
-        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
-        const centre = [0x2a, 0x2a, 0x28];
         let off = 0;
         let total = 0;
-        for (let i = 0; i < d.length; i += 4) {
-          total++;
-          const away = Math.max(
-            Math.abs(d[i] - centre[0]), Math.abs(d[i + 1] - centre[1]),
-            Math.abs(d[i + 2] - centre[2])
-          );
-          if (away > 60) off++;
+        // Only the FIELD area, and only pixels that are not the solid colour or
+        // the wall outline: the margin, the bands and the body are all far from
+        // the centre colour by design and say nothing about the continuity error.
+        for (let py = layout.margin + 2; py < layout.margin + g.ny * layout.scale - 2; py++) {
+          for (let px = layout.margin + 2; px < layout.margin + g.nx * layout.scale - 2; px++) {
+            const i = (py * c.width + px) * 4;
+            const pixel = [d[i], d[i + 1], d[i + 2]];
+            const fromSolid = Math.max(...pixel.map((v, n) => Math.abs(v - SOLID_COLOUR[n])));
+            if (fromSolid < 24) continue;
+            const away = Math.max(...pixel.map((v, n) => Math.abs(v - centre[n])));
+            if (away > 150) continue;   // the light wall outline
+            total++;
+            if (away > worst) worst = away;
+            if (away > 60) off++;
+          }
         }
-        return off / total;
+        return { worst, fractionOff: off / total, total };
       });
+      const { worst: spread, fractionOff, total } = await measure();
+      assert.ok(total > 1000, `only ${total} field pixels were measured`);
       assert.ok(
         fractionOff < 0.12,
         `${(fractionOff * 100).toFixed(1)}% of the canvas is far from the centre colour - ` +
@@ -1052,8 +1086,8 @@ describe("browser", { skip }, () => {
       );
 
       // Vorticity, by contrast, SHOULD have structure - it is a real field.
-      await page.selectOption("#mode", "vorticity");
-      await page.waitForTimeout(300);
+      await chooseMode(page, "vorticity");
+      await page.waitForTimeout(150);
       const vorticity = await readState(page);
       assert.match(vorticity.panel.viewnote, /centred on ZERO|sign carries/);
       assert.equal(vorticity.solver.iteration, state.solver.iteration);
@@ -1161,6 +1195,182 @@ describe("browser", { skip }, () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // UI refresh: rendering quality, colour maps, residuals
+  // -------------------------------------------------------------------------
+
+  test("smooth and cell rendering each draw what they claim, and neither touches the run", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(250);
+      await page.click("#run");
+      await page.waitForTimeout(2500);
+      await page.click("#pause");
+      const before = await readState(page);
+
+      // Pixels inside ONE cell: in cells mode they are identical, in smooth mode
+      // a cell in a gradient is not. And inside a SOLID cell both modes paint
+      // exactly the solid colour - the body stays the staircase being simulated.
+      const probeCells = () => page.evaluate(async () => {
+        const { SOLID_COLOUR } = await import("./visualization/colormap.js");
+        const h = window.__flowlab;
+        const l = h.layout();
+        const g = h.scenario.grid;
+        const c = document.querySelector("#field");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        const pixel = (px, py) => {
+          const k = (Math.round(py) * c.width + Math.round(px)) * 4;
+          return [d[k], d[k + 1], d[k + 2]];
+        };
+        const cellPixels = (i, j) => {
+          const x0 = l.margin + (i - 1) * l.scale;
+          const y0 = l.margin + (g.ny - j) * l.scale;
+          return [pixel(x0 + 1, y0 + 1), pixel(x0 + l.scale - 2, y0 + l.scale - 2)];
+        };
+        // A fluid cell just off the cylinder's shoulder, where speed varies fast.
+        let fluid = null;
+        let solid = null;
+        const jc = Math.round(g.ny / 2);
+        for (let i = 2; i < g.nx && (fluid === null || solid === null); i++) {
+          if (g.solid[g.idx(i, jc)] && solid === null) solid = [i, jc];
+          if (solid !== null && fluid === null && !g.solid[g.idx(i, jc + 7)] && g.solid[g.idx(i, jc + 5)]) fluid = [i, jc + 6];
+        }
+        return {
+          fluid: cellPixels(...fluid),
+          solid: cellPixels(...solid),
+          solidColour: SOLID_COLOUR,
+        };
+      });
+
+      const smooth = await probeCells();
+      assert.notDeepEqual(smooth.fluid[0], smooth.fluid[1],
+        "a smooth render must vary WITHIN a cell where the field has a gradient");
+      for (const colour of smooth.solid) {
+        assert.deepEqual(colour, smooth.solidColour, "a solid cell must stay exactly the solid colour");
+      }
+
+      await page.check("#showcells");
+      await page.waitForTimeout(250);
+      const cells = await probeCells();
+      assert.deepEqual(cells.fluid[0], cells.fluid[1], "in cells mode a cell is one flat colour");
+      for (const colour of cells.solid) assert.deepEqual(colour, cells.solidColour);
+      const after = await readState(page);
+      assert.equal(after.solver.iteration, before.solver.iteration, "rendering mode stepped the run");
+
+      // A NaN must still paint as not-finite once values are being
+      // interpolated - it may spread, but it may never be averaged away.
+      await page.uncheck("#showcells");
+      const magenta = await page.evaluate(async () => {
+        const { NON_FINITE_COLOUR } = await import("./visualization/colormap.js");
+        const h = window.__flowlab;
+        const g = h.scenario.grid;
+        g.u[g.idx(20, 20)] = NaN;
+        h.draw();
+        const c = document.querySelector("#field");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        let count = 0;
+        for (let k = 0; k < d.length; k += 4) {
+          if (d[k] === NON_FINITE_COLOUR[0] && d[k + 1] === NON_FINITE_COLOUR[1] && d[k + 2] === NON_FINITE_COLOUR[2]) count++;
+        }
+        return count;
+      });
+      assert.ok(magenta > 0, "a non-finite cell must paint as not-finite in the smooth render");
+    });
+  });
+
+  test("the colour map choice repaints magnitudes only, and says what it costs", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(250);
+      await page.click("#run");
+      await page.waitForTimeout(1500);
+      await page.click("#pause");
+      const checksum = () => page.evaluate(() => {
+        const c = document.querySelector("#field");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 97) sum = (sum * 31 + d[i]) >>> 0;
+        return sum;
+      });
+      const swatch = () => page.evaluate(() =>
+        document.querySelector('#mode .swatch[data-swatch-for="velocity"]').style.background);
+
+      const before = await readState(page);
+      const turbo = await checksum();
+      const turboSwatch = await swatch();
+      assert.match(before.panel.viewnote, /Turbo/);
+
+      await page.selectOption("#colormap", "viridis");
+      await page.waitForTimeout(250);
+      const viridis = await readState(page);
+      assert.notEqual(await checksum(), turbo, "the magnitude view must repaint in the new map");
+      assert.notEqual(await swatch(), turboSwatch, "and the tile must show the map it will use");
+      assert.match(viridis.panel.viewnote, /Viridis: perceptually uniform/);
+      assert.equal(viridis.solver.iteration, before.solver.iteration, "a colour map is not a simulation event");
+
+      // Signed views have one map; the choice must not reach them.
+      await chooseMode(page, "vorticity");
+      const signedViridis = await checksum();
+      await page.selectOption("#colormap", "turbo");
+      await page.waitForTimeout(250);
+      assert.equal(await checksum(), signedViridis, "the magnitude choice must not repaint a signed view");
+    });
+  });
+
+  test("add probe arms the probe tool, and a click then pins one", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      await page.click("#addprobe");
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => window.__flowlab.pointerTool), "probe");
+      assert.equal(
+        await page.evaluate(() => document.querySelector('button.tool[data-tool="probe"]').classList.contains("on")),
+        true, "the armed tool must show as armed in the tool list"
+      );
+      const [x, y] = await clientFor(page, 0.5, 0.5);
+      await page.mouse.click(x, y);
+      await page.waitForTimeout(200);
+      assert.equal((await readState(page)).solver.probeCount, 1);
+    });
+  });
+
+  test("the residual chart records one point per solver step against a fixed axis", async () => {
+    // Per step, not per repaint - the same rule and the same reason as the
+    // probe histories. And on an axis anchored to the bound: fitted to itself
+    // this chart was a scribble of rounding noise, because every step
+    // converges TO its tolerance.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      assert.match(
+        await page.evaluate(() => document.querySelector("#residualaxis").textContent),
+        /no steps yet/
+      );
+      await runForSteps(page, 30);
+      const recorded = await page.evaluate(() => ({
+        steps: window.__flowlab.session.iteration,
+        samples: window.__flowlab.session.residuals.length,
+        note: document.querySelector("#residualaxis").textContent,
+        worst: Math.max(...window.__flowlab.session.residuals.series().value),
+      }));
+      assert.ok(recorded.steps >= 30);
+      assert.equal(recorded.samples, recorded.steps, "one residual per solver step");
+      assert.match(recorded.note, /bound 1\.00e-7 dashed/);
+      assert.match(recorded.note, /axis 1\.00e-11-1\.00e-4 \(log\)/, "the axis is fixed, not fitted");
+      assert.ok(recorded.worst <= 1e-7, `a step broke its bound: ${recorded.worst}`);
+      assert.equal(
+        await page.evaluate(() => document.querySelector("#residualaxis").classList.contains("bad")),
+        false
+      );
+
+      // Reset rebuilds the field, so the history goes with it.
+      await page.click("#reset");
+      await page.waitForTimeout(250);
+      assert.equal(await page.evaluate(() => window.__flowlab.session.residuals.length), 0);
+    });
+  });
+
   test("switching the view does not touch the simulation", async () => {
     // M3's rule: changing what is displayed is a pure display change.
     await withApp(async ({ page }) => {
@@ -1175,14 +1385,17 @@ describe("browser", { skip }, () => {
       // check passed having switched nothing. Taken from the module that
       // defines them so the two cannot drift.
       const modes = await page.evaluate(() =>
-        [...document.querySelectorAll("#mode option")].map((o) => o.value));
+        [...document.querySelectorAll("#mode .modetile")].map((tile) => tile.dataset.mode));
       assert.deepEqual(
         modes,
         ["velocity", "pressure", "vorticity", "shear", "q", "continuity", "dye"]
       );
       for (const mode of modes) {
-        await page.selectOption("#mode", mode);
-        await page.waitForTimeout(120);
+        await chooseMode(page, mode);
+        // Exactly one tile is selected, and it is the one clicked.
+        const checked = await page.evaluate(() =>
+          [...document.querySelectorAll('#mode .modetile[aria-checked="true"]')].map((t) => t.dataset.mode));
+        assert.deepEqual(checked, [mode], `after choosing ${mode} the tiles read ${checked}`);
         assert.equal(
           (await readState(page)).solver.iteration, before.solver.iteration,
           `switching to ${mode} stepped the simulation`

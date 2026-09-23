@@ -34,3 +34,18 @@ export function integer(value) {
   if (!Number.isFinite(value)) return value > 0 ? "+Infinity" : "-Infinity";
   return String(Math.round(value));
 }
+
+// A short number for a legend tick or a top-bar readout: three significant
+// figures in plain notation across the range a person reads comfortably, and
+// exponential outside it. The non-finite cases go through the same path as
+// exponential(), so a broken value still reads as NaN rather than as a blank.
+export function compact(value) {
+  if (typeof value !== "number") return "not a number";
+  if (!Number.isFinite(value)) return exponential(value);
+  if (value === 0) return "0";
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1e-3 && magnitude < 1e4) {
+    return String(Number(value.toPrecision(3)));
+  }
+  return value.toExponential(2);
+}
