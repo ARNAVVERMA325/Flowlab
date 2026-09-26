@@ -1388,7 +1388,7 @@ describe("browser", { skip }, () => {
         [...document.querySelectorAll("#mode .modetile")].map((tile) => tile.dataset.mode));
       assert.deepEqual(
         modes,
-        ["velocity", "pressure", "vorticity", "shear", "q", "continuity", "dye"]
+        ["velocity", "pressure", "vorticity", "shear", "q", "continuity", "dye", "term"]
       );
       for (const mode of modes) {
         await chooseMode(page, mode);
@@ -1488,6 +1488,219 @@ describe("browser", { skip }, () => {
       // And a later frame does not overwrite the reason with a generic one.
       await runForSteps(page, 10);
       assert.match(await page.textContent("#expstatus"), /Reset was pressed/);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Equation explorer (M11)
+  // -------------------------------------------------------------------------
+
+  test("clicking a term shows where it acts, from a budget that closes, and touches nothing", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(200);
+      await runForSteps(page, 40);
+      const checksum = () => page.evaluate(() => {
+        const c = document.querySelector("#field");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 53) sum = (sum * 31 + d[i]) >>> 0;
+        return sum;
+      });
+      const before = await readState(page);
+      const pictures = new Map();
+      for (const term of ["unsteady", "advection", "pressure", "viscous", "source"]) {
+        await page.click(`#equation .eqterm[data-term="${term}"]`);
+        await page.waitForTimeout(120);
+        assert.equal(await page.evaluate(() => window.__flowlab.mode), "term");
+        assert.equal(await page.getAttribute(`#equation .eqterm[data-term="${term}"]`, "aria-pressed"), "true");
+        assert.equal(await page.$$eval("#equation .eqterm.on", (nodes) => nodes.length), 1, "one term at a time");
+        assert.match(await page.textContent("#legendtitle"), /share taken by/);
+        assert.match(await page.textContent("#eqwhere"), /dominat/);
+        const closure = await page.textContent("#eqclosure");
+        const relative = Number(closure.match(/to (\S+) of the largest term/)[1]);
+        assert.ok(relative < 1e-11, `the budget the page shows closes: ${closure}`);
+        assert.equal(await page.evaluate(() => document.querySelector("#eqclosure").classList.contains("bad")), false);
+        pictures.set(term, await checksum());
+      }
+      assert.equal(new Set(pictures.values()).size, 5, "each term paints its own picture");
+      assert.match(await page.textContent("#eqexplain"), /outside the equation/);
+      assert.match(await page.textContent("#eqwhere"), /dominates nowhere/, "no source in this flow");
+      const after = await readState(page);
+      assert.equal(after.solver.iteration, before.solver.iteration, "choosing a term does not step");
+      assert.equal(after.panel.time, before.panel.time);
+    });
+  });
+
+  test("the continuity constraint opens the continuity view, and the tile defaults to advection", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      await runForSteps(page, 10);
+      await page.click("#eqconstraint");
+      await page.waitForTimeout(120);
+      assert.equal(await page.evaluate(() => window.__flowlab.mode), "continuity");
+      assert.equal(await page.$$eval("#equation .eqterm.on", (nodes) => nodes.length), 0);
+      assert.match(await page.textContent("#eqwhere"), /Click a term/);
+      await chooseMode(page, "term");
+      assert.equal(await page.getAttribute('#equation .eqterm[data-term="advection"]', "aria-pressed"), "true");
+    });
+  });
+
+  test("before the first step the explorer says there is no budget rather than drawing one", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "jet");
+      await page.waitForTimeout(200);
+      await page.click('#equation .eqterm[data-term="viscous"]');
+      await page.waitForTimeout(120);
+      assert.match(await page.textContent("#eqwhere"), /Take at least one step/);
+      assert.equal(await page.textContent("#legendtitle"), "-");
+      assert.match(await page.textContent("#viewnote"), /not available/);
+      await runForSteps(page, 3);
+      assert.match(await page.textContent("#legendtitle"), /share taken by viscous/);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Fluid (M12)
+  // -------------------------------------------------------------------------
+
+  test("a chosen fluid reaches the solver, a refused one changes nothing, and custom works", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      const state = () => page.evaluate(() => {
+        const s = window.__flowlab.session.scenario;
+        return { fluid: s.material?.fluid.id ?? null, Re: s.Re, nu: s.params.nu, rho: s.params.rho };
+      });
+
+      await page.selectOption("#fluid", "air");
+      await page.click("#fluidapply");
+      await page.waitForTimeout(150);
+      let now = await state();
+      assert.equal(now.fluid, "air");
+      assert.equal(now.rho, 1.204);
+      assert.ok(Math.abs(now.Re - 66.2) < 0.1, `Re ${now.Re}`);
+      assert.match(await page.textContent("#scenariotitle"), /Air.*Re 66\.2/);
+      assert.match(await page.textContent("#fluidre"), /^66\.2/);
+      assert.match(await page.textContent("#fluidsize"), /10\.0\d* cm/);
+      await runForSteps(page, 10);
+      const air = await state();
+
+      await page.selectOption("#fluid", "mercury");
+      await page.click("#fluidapply");
+      await page.waitForTimeout(150);
+      assert.match(await page.textContent("#fluidstatus"), /Refused: .*cell Reynolds number/);
+      assert.equal(await page.evaluate(() => document.querySelector("#fluidstatus").classList.contains("bad")), true);
+      assert.deepEqual(await state(), air, "a refused fluid changes nothing");
+      assert.ok(await page.evaluate(() => window.__flowlab.session.iteration) >= 10, "and does not even reset the run");
+
+      assert.equal(await page.isHidden("#fluidcustom"), true, "the custom inputs only appear for a custom fluid");
+      await page.selectOption("#fluid", "custom");
+      assert.equal(await page.isHidden("#fluidcustom"), false);
+      await page.fill("#fluidrho", "998.2");
+      await page.fill("#fluidmu", "0.001002");
+      await page.click("#fluidapply");
+      await page.waitForTimeout(150);
+      now = await state();
+      assert.equal(now.fluid, "custom");
+      assert.ok(Math.abs(now.Re - 1000) < 1e-6, "water's properties typed in give the shipped Re");
+
+      await page.selectOption("#fluid", "scenario");
+      await page.click("#fluidapply");
+      await page.waitForTimeout(150);
+      now = await state();
+      assert.deepEqual([now.fluid, now.Re, now.rho], [null, 1000, 1]);
+      assert.equal(await page.isHidden("#fluidcustom"), true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Project and export (M13)
+  // -------------------------------------------------------------------------
+
+  test("a saved project loads back with its scenario, fluid and view", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(200);
+      await page.selectOption("#fluid", "air");
+      await page.click("#fluidapply");
+      await chooseMode(page, "vorticity");
+      await page.check("#showstreamlines");
+      const saved = page.waitForEvent("download");
+      await page.click("#projsave");
+      const download = await saved;
+      assert.equal(download.suggestedFilename(), "flowlab-cylinder.json");
+      const text = await page.evaluate(() => window.__flowlab.lastDownload.content);
+      const project = JSON.parse(text);
+      assert.equal(project.format, "flowlab-project");
+      assert.equal(project.fluid.id, "air");
+
+      // Somewhere else entirely, then back through the file input.
+      await page.selectOption("#scenario", "jet");
+      await chooseMode(page, "pressure");
+      await page.uncheck("#showstreamlines");
+      await page.setInputFiles("#projfile", { name: "saved.json", mimeType: "application/json", buffer: Buffer.from(text) });
+      await page.waitForFunction(() => window.__flowlab.session.scenarioId === "cylinder");
+      await page.waitForTimeout(150);
+      assert.equal(await page.inputValue("#scenario"), "cylinder");
+      assert.equal(await page.evaluate(() => window.__flowlab.session.scenario.material.fluid.id), "air");
+      assert.equal(await page.evaluate(() => window.__flowlab.mode), "vorticity");
+      assert.equal(await page.isChecked("#showstreamlines"), true);
+      assert.equal(await page.inputValue("#fluid"), "air");
+      assert.match(await page.textContent("#projstatus"), /loaded saved\.json/);
+    });
+  });
+
+  test("a bad project file is refused with its reason and changes nothing", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      await runForSteps(page, 5);
+      const before = await page.evaluate(() => window.__flowlab.session.iteration);
+      await page.setInputFiles("#projfile", { name: "broken.json", mimeType: "application/json", buffer: Buffer.from("{ not json") });
+      await page.waitForFunction(() => document.querySelector("#projstatus").classList.contains("bad"));
+      assert.match(await page.textContent("#projstatus"), /broken\.json was not loaded: not valid JSON/);
+      assert.equal(await page.evaluate(() => window.__flowlab.session.iteration), before);
+      assert.equal(await page.inputValue("#scenario"), "cavity");
+    });
+  });
+
+  test("every export offers the file it names, with its data", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      await runForSteps(page, 8);
+      const grab = async (button) => {
+        const offered = page.waitForEvent("download");
+        await page.click(button);
+        const download = await offered;
+        await page.waitForTimeout(50);
+        return { name: download.suggestedFilename(), info: await page.evaluate(() => window.__flowlab.lastDownload) };
+      };
+      const iteration = await page.evaluate(() => window.__flowlab.session.iteration);
+
+      const field = await grab("#exportfield");
+      assert.equal(field.name, `flowlab-cavity-step${iteration}-field.csv`);
+      assert.match(field.info.content, /\ni,j,x,y,solid,u,v,speed,p,vorticity\n/);
+      assert.equal(field.info.content.trim().split("\n").filter((l) => !l.startsWith("#")).length, 1 + 64 * 64);
+
+      const residuals = await grab("#exportresiduals");
+      assert.match(residuals.info.content, /step,continuity_error,poisson_residual/);
+      const probes = await grab("#exportprobes");
+      assert.match(probes.info.content, /no probes pinned/);
+
+      const image = await grab("#exportimage");
+      assert.equal(image.info.type, "image/png");
+      const canvas = await page.evaluate(() => [document.querySelector("#field").width, document.querySelector("#field").height]);
+      assert.deepEqual([image.info.width, image.info.height], [canvas[0], canvas[1] + 64], "the field plus its legend band");
+      const charts = await grab("#exportcharts");
+      assert.equal(charts.info.type, "image/png");
+      assert.equal(charts.info.height, 520);
+
+      await page.click("#exportexperiment");
+      assert.match(await page.textContent("#projstatus"), /No finished experiment/);
+      assert.equal(await page.evaluate(() => window.__flowlab.session.iteration), iteration, "exporting never steps");
     });
   });
 });

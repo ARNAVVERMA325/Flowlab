@@ -63,6 +63,13 @@ import { traceStreamlines } from "../physics/streamlines.js";
 import { analyseFlow, pressureDropBetween } from "../physics/flowAnalysis.js";
 import { EXPERIMENTS, experimentById } from "../experiments/definitions.js";
 import { ExperimentRunner } from "../experiments/runner.js";
+import { TERMS, termShares } from "../physics/momentumBudget.js";
+import { FLUIDS, MAX_CELL_RE, fluidById } from "../materials/fluids.js";
+import { parseProject, projectFrom } from "../io/project.js";
+import { experimentCsv, fieldCsv, probesCsv, residualsCsv } from "../io/export.js";
+import {
+  DOMINANCE_RULE, TERM_INFO, describeClosure, describeTerm, dominanceEdges,
+} from "./equationExplorer.js";
 import { drawSeries, seriesRange } from "../visualization/timeseries.js";
 import { describeSource } from "../sources/kinds.js";
 import {
@@ -118,6 +125,7 @@ const TILE_LABELS = {
   q: "Rotation (\u221aQ)",
   continuity: "Continuity",
   dye: "Dye",
+  term: "Equation term",
 };
 
 // Which ramp a view is drawn in, without preparing it. Used for the tile
@@ -127,6 +135,7 @@ function rampForView(id, palette) {
   if (source === undefined) return MAGNITUDE_RAMPS[DEFAULT_MAGNITUDE_RAMP].sample;
   if (id === "velocity") return (MAGNITUDE_RAMPS[palette] ?? MAGNITUDE_RAMPS[DEFAULT_MAGNITUDE_RAMP]).sample;
   if (id === "dye") return sampleDyeRamp;
+  if (id === "term") return MAGNITUDE_RAMPS.viridis.sample;
   return sampleDivergingRamp;
 }
 
@@ -305,6 +314,9 @@ export class Harness {
     this.bindDrawingControls();
     this.bindBoundaryControls();
     this.bindExperimentControls();
+    this.bindEquationControls();
+    this.bindFluidControls();
+    this.bindProjectControls();
   }
 
   // The boundary editor. Unlike a geometry edit this does NOT stop the run or
@@ -740,6 +752,7 @@ export class Harness {
     this.mode = id;
     this.syncModeTiles();
     this.draw();
+    this.updateEquationPanel();
   }
 
   // The selected tile, and every tile's swatch painted from the ramp its view
@@ -828,11 +841,13 @@ export class Harness {
     // The label names the scenario, and its Reynolds number is part of the
     // name - so when a run overrides Re, the title says so. During a sweep it
     // read "Lid-driven cavity (Re 1000)" over a run at Re 100.
-    const { Re, defaultRe } = this.scenario;
-    this.root.querySelector("#scenariotitle").textContent =
-      Number.isFinite(defaultRe) && Re !== defaultRe
+    const { Re, defaultRe, material } = this.scenario;
+    this.root.querySelector("#scenariotitle").textContent = material
+      ? `${this.scenario.label} \u2014 ${material.fluid.name}, Re ${show(Re)}`
+      : Number.isFinite(defaultRe) && Re !== defaultRe
         ? `${this.scenario.label} \u2014 running at Re ${integer(Re)}`
         : this.scenario.label;
+    this.updateFluidPanel();
   }
 
   // Dye controls only ever touch the tracer. They do not reset the run: the
@@ -974,6 +989,10 @@ export class Harness {
       sources: this.sourcePlan,
       divergenceTol: this.scenario.params.divergenceTol,
       palette: this.palette,
+      // Only built for the term view: the budget is a second pass over the
+      // field, and the other views have no use for it.
+      shares: this.mode === "term" ? this.currentShares() : null,
+      term: this.equationTerm,
     });
     // The preview and the region overlay are drawn through the renderer's tint
     // hook, inside the loop that already visits every cell, and the count of
@@ -992,6 +1011,7 @@ export class Harness {
     drawSurfaceOutline(this.renderer.context, grid, {
       originX: MARGIN, originY: MARGIN, scale: this.scale, h: grid.h, ny: grid.ny,
     }, { width: Math.max(1, Math.min(2, this.scale / 4)) });
+    if (view?.id === "term") this.drawDominanceOutline(grid);
     drawBoundaryOverlay(this.renderer.context, this.plan, {
       originX: MARGIN,
       originY: MARGIN,
@@ -1087,9 +1107,11 @@ export class Harness {
     this.updateSourcePanel();
     this.updateProbePanel();
     this.updateAnalysisPanel();
+    this.updateEquationPanel();
     if (this.experiment) this.updateExperimentPanel();
     this.updateBoundaryPanel();
     this.updateGeometryPanel();
+    this.lastView = view;
     this.updateLegend(view);
   }
 
@@ -1592,6 +1614,383 @@ export class Harness {
     }
     results.appendChild(runs);
     summary.textContent = runner.conclusion.summary;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Project and export (M13)
+  // ---------------------------------------------------------------------------
+
+  bindProjectControls() {
+    const { root } = this;
+    const on = (id, handler) => root.querySelector(id).addEventListener("click", handler);
+    on("#projsave", () => this.download(
+      `flowlab-${this.scenarioId}.json`,
+      JSON.stringify(projectFrom(this.session, this.viewSettings()), null, 2),
+      "application/json",
+      "project saved",
+    ));
+    root.querySelector("#projfile").addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      event.target.value = ""; // so choosing the same file again still fires
+      if (file) this.loadProjectText(await file.text(), file.name);
+    });
+    const stem = () => `flowlab-${this.scenarioId}-step${this.session.iteration}`;
+    on("#exportfield", () => this.download(`${stem()}-field.csv`, fieldCsv(this.session), "text/csv", "field exported"));
+    on("#exportprobes", () => this.download(`${stem()}-probes.csv`, probesCsv(this.session), "text/csv", "probe histories exported"));
+    on("#exportresiduals", () => this.download(`${stem()}-residuals.csv`, residualsCsv(this.session), "text/csv", "residuals exported"));
+    on("#exportexperiment", () => {
+      const runner = this.experiment;
+      if (runner?.state !== "finished") {
+        this.setProjectStatus("No finished experiment to export - run one to completion first.", true);
+        return;
+      }
+      this.download(`flowlab-experiment-${runner.experiment.id}.csv`, experimentCsv(runner.experiment, runner), "text/csv", "experiment exported");
+    });
+    on("#exportimage", () => this.downloadCanvas(this.composeImage(), `${stem()}-${this.mode}.png`, "image exported"));
+    on("#exportcharts", () => this.downloadCanvas(this.composeCharts(), `${stem()}-charts.png`, "charts exported"));
+  }
+
+  // What a project remembers about how the picture was arranged. The session
+  // has no view, so the app keeps and restores this part itself.
+  viewSettings() {
+    return {
+      mode: this.mode,
+      overlays: { ...this.overlays },
+      palette: this.palette,
+      smooth: this.smooth,
+      equationTerm: this.equationTerm,
+    };
+  }
+
+  applyViewSettings(view) {
+    if (!view) return;
+    const { root } = this;
+    if (view.palette in MAGNITUDE_RAMPS) {
+      this.palette = view.palette;
+      root.querySelector("#colormap").value = view.palette;
+    }
+    if (typeof view.smooth === "boolean") {
+      this.smooth = view.smooth;
+      root.querySelector("#showcells").checked = !view.smooth;
+    }
+    for (const name of Object.keys(this.overlays)) {
+      const value = Boolean(view.overlays?.[name]);
+      this.overlays[name] = value;
+      const box = root.querySelector(`#show${name}`);
+      if (box) box.checked = value;
+    }
+    if (TERMS.includes(view.equationTerm)) this.equationTerm = view.equationTerm;
+    if (FIELD_SOURCES.some((source) => source.id === view.mode)) this.setMode(view.mode);
+  }
+
+  loadProjectText(text, name = "project") {
+    let view;
+    try {
+      view = this.session.importProject(parseProject(text));
+    } catch (error) {
+      this.setProjectStatus(`${name} was not loaded: ${error.message}`, true);
+      return false;
+    }
+    this.interruptExperiment("a project was loaded");
+    this.stopLoop();
+    this.scenarioId = this.session.scenarioId;
+    this.root.querySelector("#scenario").value = this.scenarioId;
+    this.failure = null;
+    this.failureKind = null;
+    this.state = "paused";
+    this.editMessage = null;
+    this.fluidMessage = null;
+    this.drawing.cancel();
+    this.probeSelection = null;
+    this.hoverPoint = null;
+    this.syncScenario();
+    this.syncBoundaryForm();
+    this.root.querySelector("#note").textContent = this.scenario.note;
+    this.renderValidation();
+    this.applyViewSettings(view);
+    this.draw();
+    this.setProjectStatus(`loaded ${name}: ${this.scenario.label}, from rest - press Run`);
+    return true;
+  }
+
+  setProjectStatus(text, bad = false) {
+    const status = this.root.querySelector("#projstatus");
+    status.textContent = text;
+    status.classList.toggle("bad", bad);
+  }
+
+  // Hands a file to the browser. Also kept on the harness as lastDownload, so
+  // a check can read exactly what was offered without a filesystem.
+  download(name, content, type, what) {
+    const blob = content instanceof Blob ? content : new Blob([content], { type });
+    this.lastDownload = { name, type: blob.type, size: blob.size, content: typeof content === "string" ? content : null };
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    this.setProjectStatus(`${what}: ${name}`);
+  }
+
+  downloadCanvas(canvas, name, what) {
+    canvas.toBlob((blob) => {
+      if (blob === null) {
+        this.setProjectStatus("the image could not be encoded", true);
+        return;
+      }
+      this.download(name, blob, "image/png", what);
+      this.lastDownload.width = canvas.width;
+      this.lastDownload.height = canvas.height;
+    }, "image/png");
+  }
+
+  // The field exactly as drawn, with a title and the legend under it - an
+  // image without its scale is a picture, not a result.
+  composeImage() {
+    const field = this.root.querySelector("#field");
+    const band = 64;
+    const out = document.createElement("canvas");
+    out.width = field.width;
+    out.height = field.height + band;
+    const ctx = out.getContext("2d");
+    ctx.fillStyle = "#070b12";
+    ctx.fillRect(0, 0, out.width, out.height);
+    ctx.drawImage(field, 0, 0);
+    const text = (id) => this.root.querySelector(id).textContent;
+    const y0 = field.height;
+    ctx.fillStyle = "#e6ebf2";
+    ctx.font = "600 14px sans-serif";
+    ctx.fillText(`${text("#scenariotitle")} - t = ${fixed(this.session.simulatedTime, 3)}`, 12, y0 + 20);
+    const barX = 12;
+    const barW = Math.min(360, out.width - 24);
+    const gradient = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+    const view = this.lastView;
+    for (let k = 0; k <= 24; k++) {
+      gradient.addColorStop(k / 24, view ? samplerCss(view.ramp, k / 24) : "#000");
+    }
+    ctx.fillStyle = gradient;
+    ctx.fillRect(barX, y0 + 30, barW, 10);
+    ctx.fillStyle = "#8a97ab";
+    ctx.font = "12px sans-serif";
+    ctx.fillText(text("#legendmin"), barX, y0 + 56);
+    const max = text("#legendmax");
+    ctx.fillText(max, barX + barW - ctx.measureText(max).width, y0 + 56);
+    ctx.fillText(text("#legendtitle"), barX + barW + 16, y0 + 40);
+    return out;
+  }
+
+  composeCharts() {
+    const charts = ["#residualchart", "#probechart"].map((id) => this.root.querySelector(id));
+    const out = document.createElement("canvas");
+    out.width = Math.max(...charts.map((c) => c.width));
+    out.height = charts.reduce((sum, c) => sum + c.height, 0);
+    const ctx = out.getContext("2d");
+    ctx.fillStyle = "#0e1522";
+    ctx.fillRect(0, 0, out.width, out.height);
+    let y = 0;
+    for (const chart of charts) {
+      ctx.drawImage(chart, 0, y);
+      y += chart.height;
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Fluid (M12)
+  // ---------------------------------------------------------------------------
+
+  bindFluidControls() {
+    const { root } = this;
+    const select = root.querySelector("#fluid");
+    const add = (value, text) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      select.appendChild(option);
+    };
+    add("scenario", "Scenario fluid (as built, dimensionless)");
+    for (const fluid of FLUIDS) add(fluid.id, fluid.name);
+    add("custom", "Custom fluid...");
+    select.addEventListener("change", () => {
+      root.querySelector("#fluidcustom").hidden = select.value !== "custom";
+    });
+    root.querySelector("#fluidapply").addEventListener("click", () => this.applyFluid());
+    this.fluidMessage = null;
+    this.updateFluidPanel();
+  }
+
+  // A new fluid is a new problem, so the field is rebuilt from rest - through
+  // the session, which refuses what it cannot run and changes nothing then.
+  applyFluid() {
+    const { root } = this;
+    const choice = root.querySelector("#fluid").value;
+    let fluid = null;
+    if (choice === "custom") {
+      fluid = {
+        id: "custom",
+        name: "Custom fluid",
+        rho: Number(root.querySelector("#fluidrho").value),
+        mu: Number(root.querySelector("#fluidmu").value),
+      };
+    } else if (choice !== "scenario") {
+      fluid = fluidById(choice);
+    }
+    try {
+      this.session.setMaterial(fluid);
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      this.fluidMessage = { text: error.message, bad: true };
+      this.updateFluidPanel();
+      return;
+    }
+    this.interruptExperiment("the fluid was changed");
+    this.fluidMessage = null;
+    this.stopLoop();
+    this.failure = null;
+    this.failureKind = null;
+    this.state = "paused";
+    this.syncScenario();
+    this.renderValidation();
+    this.draw();
+  }
+
+  updateFluidPanel() {
+    const { root } = this;
+    // Called from syncScenario, which can run before the controls are bound,
+    // and bound before the first scenario is loaded - both are no-ops.
+    if (!root.querySelector("#fluid").options.length || !this.session) return;
+    const material = this.scenario.material ?? null;
+    const set = (id, text) => { root.querySelector(id).textContent = text; };
+    const status = root.querySelector("#fluidstatus");
+    if (!this.fluidMessage) {
+      root.querySelector("#fluid").value = material ? material.fluid.id : "scenario";
+      root.querySelector("#fluidcustom").hidden = !material || material.fluid.id !== "custom";
+    }
+    if (material === null) {
+      const { params, Re } = this.scenario;
+      set("#fluidrhoout", `${show(params.rho)} (scenario units)`);
+      set("#fluidmuout", "-");
+      set("#fluidnu", `${show(params.nu)} (scenario units)`);
+      set("#fluidsize", "dimensionless");
+      set("#fluidre", show(Re));
+      set("#fluidcellre", "-");
+    } else {
+      const { fluid, physical, Re, cellRe } = material;
+      set("#fluidrhoout", `${show(fluid.rho)} kg/m\u00b3`);
+      set("#fluidmuout", `${show(fluid.mu)} Pa\u00b7s`);
+      set("#fluidnu", `${show(physical.nu)} m\u00b2/s`);
+      set("#fluidsize", `${show(physical.length * 100)} cm (${this.scenario.reference.length}), ${show(physical.speed * 100)} cm/s`);
+      set("#fluidre", show(Re));
+      set("#fluidcellre", `${show(cellRe)} (limit ${MAX_CELL_RE})`);
+    }
+    status.classList.toggle("bad", Boolean(this.fluidMessage?.bad));
+    status.textContent = this.fluidMessage
+      ? `Refused: ${this.fluidMessage.text}`
+      : material
+        ? `${material.fluid.name} in the same apparatus. Press Run.`
+        : "The scenario's own fluid. Choose a real one and press Apply.";
+  }
+
+  // ---------------------------------------------------------------------------
+  // Equation explorer (M11)
+  // ---------------------------------------------------------------------------
+
+  // The equation's terms are buttons. Choosing one switches the picture to that
+  // term's share of the momentum budget and outlines where it dominates; the
+  // words beside it are written from the same measured budget.
+  bindEquationControls() {
+    const { root } = this;
+    this.equationTerm = "advection";
+    this.sharesCache = null;
+    for (const button of root.querySelectorAll("#equation .eqterm")) {
+      button.addEventListener("click", () => this.selectTerm(button.dataset.term));
+    }
+    // The constraint is not a term with a budget - it is what the pressure
+    // exists to enforce - so it opens the view that shows how well it holds.
+    root.querySelector("#eqconstraint").addEventListener("click", () => this.setMode("continuity"));
+    root.querySelector("#eqrule").textContent = DOMINANCE_RULE;
+    this.updateEquationPanel();
+  }
+
+  selectTerm(term) {
+    if (!TERMS.includes(term)) return;
+    this.equationTerm = term;
+    this.setMode("term");
+  }
+
+  // termShares() for the current step, computed once per step however many
+  // frames ask for it.
+  currentShares() {
+    const budget = this.session.momentumBudget();
+    if (budget === null) return null;
+    const iteration = this.session.iteration;
+    if (this.sharesCache?.budget !== budget) {
+      this.sharesCache = { budget, iteration, shares: termShares(this.scenario.grid, budget) };
+    }
+    return this.sharesCache.shares;
+  }
+
+  drawDominanceOutline(grid) {
+    const shares = this.currentShares();
+    if (shares === null) return;
+    const segments = dominanceEdges(grid, shares.dominant, TERMS.indexOf(this.equationTerm));
+    const ctx = this.renderer.context;
+    const s = this.scale;
+    const top = MARGIN + grid.ny * s;
+    ctx.save();
+    ctx.lineCap = "square";
+    // A dark line under a light one, so the outline reads on both ends of the
+    // ramp - viridis runs from near-black to pale yellow.
+    for (const [style, width] of [["rgba(0,0,0,0.75)", 3], ["#f8fafc", 1.25]]) {
+      ctx.strokeStyle = style;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      for (const { x0, y0, x1, y1 } of segments) {
+        ctx.moveTo(MARGIN + x0 * s, top - y0 * s);
+        ctx.lineTo(MARGIN + x1 * s, top - y1 * s);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  updateEquationPanel() {
+    const { root } = this;
+    const term = this.equationTerm;
+    if (term === undefined) return; // before bindEquationControls has run
+    const showing = this.mode === "term";
+    for (const button of root.querySelectorAll("#equation .eqterm")) {
+      const on = button.dataset.term === term;
+      button.classList.toggle("on", on && showing);
+      button.setAttribute("aria-pressed", on && showing ? "true" : "false");
+    }
+    const info = TERM_INFO[term];
+    root.querySelector("#eqname").textContent = `${info.symbol}  -  ${info.name}`;
+    root.querySelector("#eqexplain").textContent = info.explain;
+    const where = root.querySelector("#eqwhere");
+    const closure = root.querySelector("#eqclosure");
+    // The budget is a second pass over the field, so it is only taken while
+    // the term view is up - every other view costs exactly what it did.
+    if (!showing) {
+      where.textContent = "Click a term in the equation to see where it acts in this flow.";
+      closure.textContent = "";
+      closure.classList.remove("bad");
+      return;
+    }
+    const budget = this.session.momentumBudget();
+    if (budget === null) {
+      where.textContent =
+        "Take at least one step to see where this term acts: the budget describes a step, and none has been taken since the last reset.";
+      closure.textContent = "";
+      return;
+    }
+    const shares = this.currentShares();
+    where.textContent = describeTerm(term, shares);
+    closure.textContent = describeClosure(budget);
+    closure.classList.toggle("bad", !(budget.relativeClosure < 1e-9));
   }
 
   // ---------------------------------------------------------------------------

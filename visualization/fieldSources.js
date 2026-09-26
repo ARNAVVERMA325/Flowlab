@@ -406,7 +406,47 @@ const DYE = {
   },
 };
 
-export const FIELD_SOURCES = [VELOCITY, PRESSURE, VORTICITY, SHEAR, QCRITERION, CONTINUITY, DYE];
+// M11. The share of the momentum budget taken by one term of the equation -
+// |term| over the sum of all five magnitudes at the cell - from the measured
+// budget of the last step (physics/momentumBudget.js). A share is a fraction
+// with a meaning at both ends, so the scale is FIXED at 0..1 rather than
+// fitted: 0.9 reads the same in every flow. Drawn in viridis, whose lightness
+// rises monotonically, because "more of this term" should read as "brighter"
+// without the reader having to learn turbo's hue order.
+const TERM_LABELS = {
+  unsteady: "\u2202u/\u2202t",
+  advection: "advection (u\u00b7\u2207)u",
+  pressure: "pressure \u2212\u2207p",
+  viscous: "viscous \u03bc\u2207\u00b2u",
+  source: "external force f",
+};
+
+const TERM = {
+  id: "term",
+  label: "share of the momentum budget",
+  requires: "budget",
+  note:
+    "Each term's magnitude as a fraction of all five together, per cell, from the " +
+    "budget of the last step. Still cells are drawn at zero. The outline marks where " +
+    "this term dominates by the stated margin.",
+  prepare(context) {
+    const { grid, shares, term } = context;
+    const share = shares.share[term];
+    const valueAt = (i, j) => share[grid.idx(i, j)];
+    const summary = inspectScalar(grid, valueAt);
+    return {
+      label: `share taken by ${TERM_LABELS[term]}`,
+      valueAt,
+      summary,
+      scale: { lo: 0, hi: 1, centre: null, diverging: false, fixed: true },
+      normalise: (value) => value,
+      ramp: MAGNITUDE_RAMPS.viridis.sample,
+      term,
+    };
+  },
+};
+
+export const FIELD_SOURCES = [VELOCITY, PRESSURE, VORTICITY, SHEAR, QCRITERION, CONTINUITY, DYE, TERM];
 export const DEFAULT_FIELD_SOURCE = "velocity";
 
 export function fieldSourceById(id) {
@@ -417,6 +457,8 @@ export function fieldSourceAvailable(id, context) {
   const source = fieldSourceById(id);
   if (!source) return false;
   if (source.requires === "tracer") return Boolean(context?.tracer);
+  // No budget before the first step: it describes a step, and none was taken.
+  if (source.requires === "budget") return Boolean(context?.grid && context?.shares && context?.term);
   return Boolean(context?.grid);
 }
 

@@ -57,6 +57,9 @@ import { PassiveTracer } from "../tracer/passiveScalar.js";
 import { PathlineSet } from "../tracer/pathlines.js";
 import { tracerConfigFor } from "../tracer/seeds.js";
 import { step } from "../solver/ns2d.js";
+import { momentumBudget } from "../physics/momentumBudget.js";
+import { applyFluid, MAX_CELL_RE } from "../materials/fluids.js";
+import { ProjectError, checkProject } from "../io/project.js";
 import { computeStableTimestep } from "../solver/stability.js";
 import { sourcePlanFor } from "../sources/compile.js";
 import { combineSources } from "./brush.js";
@@ -260,6 +263,8 @@ export class SimulationSession {
     this.lastTimestep = null;
     this.lastSelection = null;
     this.lastStep = null;
+    this.lastStepInputs = null;
+    this.budgetCache = null;
     this.lastTracer = null;
     this.running = false;
     // The field is now consistent with this mask, and with nothing else.
@@ -377,7 +382,14 @@ export class SimulationSession {
     // the signature of a source that is being displayed and not applied.
     this.previousU.set(grid.u);
     this.previousV.set(grid.v);
-    this.lastStep = step(grid, bc, { ...params, dt: selection.dt, sources });
+    const stepParams = { ...params, dt: selection.dt, sources };
+    this.lastStep = step(grid, bc, stepParams);
+    // What this step was given, kept for the momentum budget. A boundary edit
+    // or a brush stroke between this step and the next paint would otherwise
+    // have the budget describe a step with a different right-hand side from
+    // the one that ran - and it would not close. Both are frozen or rebuilt
+    // on change rather than mutated, so holding the references is enough.
+    this.lastStepInputs = { bc, params: stepParams };
     this.changeRate = this.#measureChangeRate(grid, selection.dt);
     this.iteration++;
     this.simulatedTime += selection.dt;
@@ -425,15 +437,131 @@ export class SimulationSession {
       );
     }
     if (Re === null) delete this.overrides.Re;
-    else this.overrides.Re = Re;
+    else {
+      this.overrides.Re = Re;
+      // A Reynolds number without a fluid is dimensionless: it replaces a
+      // chosen material rather than stacking a second viscosity on top of it.
+      delete this.overrides.material;
+    }
     this.running = false;
     this.reset();
     return true;
   }
 
+  // Fills this scenario's apparatus with a real fluid - see
+  // materials/fluids.js for the physical scale and what rho and mu each do.
+  // Refused, with nothing changed, when the grid cannot resolve the result.
+  // Passing null returns to the scenario's own dimensionless fluid. Returns
+  // the session, so a caller can chain a run onto it.
+  setMaterial(fluid) {
+    if (fluid !== null) {
+      const outcome = applyFluid(this.#fluidDefaults(), fluid);
+      if (!outcome.resolvable) {
+        throw new RangeError(
+          `${fluid.name ?? "this fluid"} would run "${this.scenarioId}" at Re ${outcome.Re.toPrecision(3)}, ` +
+          `a cell Reynolds number of ${outcome.cellRe.toPrecision(3)} on this grid - past ${MAX_CELL_RE}, ` +
+          `finer than anything here has been checked at. Refused rather than run unresolved.`
+        );
+      }
+    }
+    if (fluid === null) delete this.overrides.material;
+    else {
+      this.overrides.material = { ...fluid };
+      delete this.overrides.Re;
+    }
+    this.running = false;
+    this.reset();
+    return this;
+  }
+
+  // Loads a saved project (io/project.js) - the whole setup, from rest.
+  //
+  // Validated by BUILDING it: the project is first applied to a scratch
+  // session, through the same operations an edit in the app goes through, so
+  // a geometry, boundary, source or fluid that would be refused in the app is
+  // refused here with the same message. Only if every part succeeds is it
+  // applied to this session, which a refusal therefore leaves exactly as it
+  // was - not even reset. Returns the project's saved view settings for the
+  // app to apply; the session has no view.
+  importProject(project) {
+    checkProject(project);
+    const attempt = (session) => {
+      try {
+        session.#applyProject(project);
+      } catch (error) {
+        if (error instanceof ProjectError) throw error;
+        throw new ProjectError(`the project could not be loaded: ${error.message}`);
+      }
+    };
+    attempt(new SimulationSession(project.scenario));
+    attempt(this);
+    return project.view ?? null;
+  }
+
+  #applyProject(project) {
+    this.load(project.scenario);
+    for (const operation of project.geometry.operations) this.editor.append(operation);
+    // One rebuild for the whole document rather than one per shape.
+    this.reset();
+    for (const side of Object.keys(project.boundaries)) {
+      this.boundaries.setSide(side, project.boundaries[side]);
+    }
+    this.placedSources = [];
+    this.#rebuildSources();
+    for (const source of project.sources) this.addSource(source);
+    if (project.fluid !== null) this.setMaterial(project.fluid);
+    else if (project.Re !== null) this.setReynolds(project.Re);
+    for (const { x, y } of project.probes) this.addProbe(x, y);
+    this.reset();
+  }
+
+  // The scenario as BUILT, before any override - what a fluid is applied to.
+  #fluidDefaults() {
+    const built = buildScenario(this.scenarioId, this.editor.document);
+    return {
+      nu: built.params.nu,
+      rho: built.params.rho,
+      U: built.reference.U,
+      L: built.reference.L,
+      h: built.grid.h,
+      speedSetByViscosity: Boolean(built.reference.speedSetByViscosity),
+    };
+  }
+
+  // The momentum budget of the last step, term by term - what moved the
+  // fluid, measured with the solver's own stencils. See
+  // physics/momentumBudget.js. Null before any step. Computed on demand and
+  // kept until the next step, because the display asks every frame and the
+  // answer only changes when the field does.
+  momentumBudget() {
+    if (this.lastStepInputs === null) return null;
+    if (this.budgetCache?.iteration === this.iteration) return this.budgetCache.budget;
+    const { bc, params } = this.lastStepInputs;
+    const budget = momentumBudget(this.grid, bc, params, this.previousU, this.previousV);
+    this.budgetCache = { iteration: this.iteration, budget };
+    return budget;
+  }
+
   #applyOverrides() {
     const scenario = this.scenario;
     scenario.defaultRe = scenario.Re;
+    scenario.material = null;
+    const fluid = this.overrides.material;
+    if (fluid !== undefined) {
+      const outcome = applyFluid({
+        nu: scenario.params.nu,
+        rho: scenario.params.rho,
+        U: scenario.reference.U,
+        L: scenario.reference.L,
+        h: scenario.grid.h,
+        speedSetByViscosity: Boolean(scenario.reference.speedSetByViscosity),
+      }, fluid);
+      scenario.params = { ...scenario.params, ...outcome.params };
+      scenario.Re = outcome.Re;
+      scenario.reference = { ...scenario.reference, U: outcome.speed };
+      scenario.material = { fluid: { ...fluid }, ...outcome };
+      return;
+    }
     const Re = this.overrides.Re;
     if (Re === undefined) return;
     const { U, L } = scenario.reference;

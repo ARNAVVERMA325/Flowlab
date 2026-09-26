@@ -252,9 +252,27 @@ Not scheduled. Do not start any of these while a NOW milestone is open.
 - **M11 — Equation explorer**: governing equations in the UI; click a term
   (`∂u/∂t`, `u·∇u`, `−∇p`, `μ∇²u`, `f`) to get an explanation *and* a highlight of where
   that effect currently dominates
+  *Built — see `docs/M11-equation-explorer.md`. Every term is computed with the solver's
+  own stencils from the step it just took, and ∂u/∂t is measured rather than computed,
+  so the budget must **close** — it does, to 1e-15..3e-14 of the largest term in every
+  scenario, and the panel prints the check. "Dominates" needs a **10% margin**: naming
+  the plain largest called the developed channel 100% pressure-dominated, when it is
+  exactly a pressure-viscous balance — now reported as one.*
 - **M12 — Materials**: water, air, custom fluid; density and viscosity must genuinely
   affect the solver
+  *Built — see `docs/M12-materials.md`. Each scenario as shipped is water at 1 cm/s in an
+  apparatus of stated size; another fluid fills the same apparatus. Measured: with speeds
+  prescribed the velocity depends only on ν = μ/ρ (identical to 8.6e-16 at 10× density,
+  pressure exactly 10×); with a pressure prescribed the flow rate goes as 1/μ (air/water
+  54.9041 against 54.9041). A fluid that would exceed a cell Reynolds number of 20 — past
+  anything here has been checked at — is **refused** (mercury, in every velocity-driven
+  scenario).*
 - **M13 — Import / export**: save and load projects, export data/CSV/images/graphs
+  *Built — see `docs/M13-import-export.md`. A project is the setup, not the field: the
+  solver is deterministic, and a test loads a saved project into a fresh session, runs 40
+  steps and requires the field **byte-identical** to the original's. Loading is validated
+  by building the project on a scratch session first, so a refusal changes nothing.
+  Exports are full precision (every value round-trips with ===) and write NaN as NaN.*
 - **M14 — Performance**: Web Workers, WebGL/WebGPU, adaptive resolution. UI must stay
   responsive; the sim loop must never freeze the app
 
