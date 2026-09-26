@@ -177,7 +177,11 @@ function pressureChannel(override) {
     params: { nu, rho: 1, divergenceTol: 1e-7, poissonMaxIterations: 20000 },
     timestep: { safety: DEFAULT_SAFETY },
     Re: Math.round((U * w) / nu),
-    reference: { U, L: w, speed: "mean speed from the pressure drop", length: "channel width" },
+    // The speed here is an OUTPUT - it is set by the viscosity through the
+    // formula above - so this scenario cannot be re-run at another Reynolds
+    // number by changing nu alone: U moves with it and Re goes as 1/nu^2.
+    // SimulationSession.setReynolds() reads this flag and refuses.
+    reference: { U, L: w, speed: "mean speed from the pressure drop", length: "channel width", speedSetByViscosity: true },
   };
 }
 

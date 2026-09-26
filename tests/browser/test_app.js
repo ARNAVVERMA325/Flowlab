@@ -1406,4 +1406,88 @@ describe("browser", { skip }, () => {
       assert.equal(after.panel.time, before.panel.time);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Experiments (M10)
+  // -------------------------------------------------------------------------
+
+  test("choosing an experiment describes it and touches nothing else", async () => {
+    await withApp(async ({ page }) => {
+      const before = await readState(page);
+      const scenario = await page.inputValue("#scenario");
+      await page.selectOption("#experiment", "sweep");
+      await page.waitForTimeout(150);
+      const question = await page.textContent("#expquestion");
+      assert.match(question, /lid drags fluid/);
+      assert.match(await page.textContent("#expreference"), /ghia1982/);
+      assert.equal(await page.isDisabled("#expstop"), true, "nothing is running to stop");
+      const after = await readState(page);
+      assert.equal(after.solver.iteration, before.solver.iteration);
+      assert.equal(await page.inputValue("#scenario"), scenario, "describing loads nothing");
+    });
+  });
+
+  test("the pipe experiment runs from rest to steady and reports agreement", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#experiment", "pipe");
+      await page.click("#expstart");
+      assert.equal(await page.isDisabled("#expstart"), true, "one experiment at a time");
+      await page.waitForFunction(() => window.__flowlab.experiment?.state !== "running", null, { timeout: 120000 });
+      assert.equal(await page.evaluate(() => window.__flowlab.experiment.state), "finished");
+      assert.equal(await page.inputValue("#scenario"), "pressure-channel", "the app shows the flow it measured");
+      const verdicts = await page.$$eval("#expresults .expitem .expv span:last-child", (spans) => spans.map((s) => s.textContent));
+      assert.deepEqual(verdicts, ["agrees", "agrees", "agrees"]);
+      assert.match(await page.textContent("#expresults .runs"), /steady \(rate/);
+      assert.doesNotMatch(await page.textContent("#expresults .runs"), /NOT steady/);
+      assert.match(await page.textContent("#expsummary"), /outputs/);
+      assert.equal(await page.isDisabled("#expstop"), true);
+      assert.equal(await page.isDisabled("#expstart"), false);
+      // The numbers in the panel are the runner's, not recomputed by the page.
+      const measured = await page.evaluate(() => window.__flowlab.experiment.results[0].measured.meanU);
+      const shown = await page.textContent("#expresults .expitem .expv span.num");
+      assert.equal(shown, measured.toPrecision(4));
+    });
+  });
+
+  test("a sweep run is at the Re it says, the title says so, and Stop ends it", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#experiment", "sweep");
+      await page.click("#expstart");
+      await page.waitForFunction(() => window.__flowlab.session.iteration > 20, null, { timeout: 60000 });
+      const { Re, nu, U, L } = await page.evaluate(() => {
+        const s = window.__flowlab.session.scenario;
+        return { Re: s.Re, nu: s.params.nu, U: s.reference.U, L: s.reference.L };
+      });
+      assert.equal(Re, 100);
+      assert.ok(Math.abs((U * L) / nu - 100) < 1e-9, "the solver's viscosity is Re 100's");
+      assert.match(await page.textContent("#scenariotitle"), /running at Re 100/);
+      assert.match(await page.textContent("#expstatus"), /run 1 of 3: Re 100/);
+      await page.click("#expstop");
+      await page.waitForTimeout(150);
+      assert.equal(await page.evaluate(() => window.__flowlab.experiment.state), "stopped");
+      assert.equal((await readState(page)).panel.status, "PAUSED", "Stop pauses the run");
+      assert.match(await page.textContent("#expstatus"), /partial runs are not reported/);
+      assert.equal(await page.textContent("#expresults"), "", "nothing concluded from a stopped run");
+    });
+  });
+
+  test("a person's own action interrupts an experiment instead of being measured by it", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#experiment", "sweep");
+      await page.click("#expstart");
+      await page.waitForFunction(() => window.__flowlab.session.iteration > 20, null, { timeout: 60000 });
+      await page.click("#reset");
+      await page.waitForTimeout(150);
+      assert.equal(await page.evaluate(() => window.__flowlab.experiment.state), "stopped");
+      assert.match(await page.textContent("#expstatus"), /stopped: .*Nothing is reported/);
+      // Reset returns to the scenario as defined, so the Re the experiment set
+      // does not linger - and the title and the solver agree on that.
+      assert.equal(await page.evaluate(() => window.__flowlab.session.scenario.Re), 1000);
+      assert.equal(await page.evaluate(() => window.__flowlab.session.scenario.params.nu), 1 / 1000);
+      assert.doesNotMatch(await page.textContent("#scenariotitle"), /running at Re/);
+      // And a later frame does not overwrite the reason with a generic one.
+      await runForSteps(page, 10);
+      assert.match(await page.textContent("#expstatus"), /Reset was pressed/);
+    });
+  });
 });

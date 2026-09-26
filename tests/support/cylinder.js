@@ -7,6 +7,7 @@ import { StaggeredGrid } from "../../geometry/grid.js";
 import { applyDocument } from "../../geometry/document.js";
 import { cylinderDocument } from "../../geometry/documents.js";
 import { step, computeDivergence } from "../../solver/ns2d.js";
+import { wakeLength } from "../../physics/features.js";
 
 const cache = new Map();
 
@@ -149,30 +150,10 @@ function isFluidUFace(grid, i, j) {
 // body carry reflected ghost values; treating either as flow data would put
 // the reattachment point on the cylinder itself.
 export function wakeBubbleLength(run) {
-  const { grid, jc, xc, D, h, nx } = run;
-  const rear = xc + D / 2;
-
-  let sawReversal = false;
-  let prevX = null;
-  let prevU = null;
-  for (let i = 1; i <= nx - 1; i++) {
-    const x = i * h;
-    if (x <= rear || !isFluidUFace(grid, i, jc)) continue;
-    const u = grid.u[grid.idx(i, jc)];
-    if (u < 0) {
-      sawReversal = true;
-      prevX = x;
-      prevU = u;
-      continue;
-    }
-    if (sawReversal) {
-      // Linear interpolation to the sign change.
-      const xr = prevX + (x - prevX) * (-prevU / (u - prevU));
-      return { separated: true, length: xr - rear, lengthOverD: (xr - rear) / D };
-    }
-    return { separated: false, length: 0, lengthOverD: 0 };
-  }
-  return { separated: sawReversal, length: NaN, lengthOverD: NaN };
+  // Delegates to physics/features.js since M10, so the app's cylinder
+  // experiment and this validated measurement are one definition.
+  const { grid, jc, xc, D } = run;
+  return wakeLength(grid, { row: jc, rear: xc + D / 2, D });
 }
 
 // Peak reverse velocity on the centreline, as a fraction of the inlet speed.

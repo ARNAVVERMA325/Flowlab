@@ -61,6 +61,8 @@ import {
 } from "../visualization/flowOverlay.js";
 import { traceStreamlines } from "../physics/streamlines.js";
 import { analyseFlow, pressureDropBetween } from "../physics/flowAnalysis.js";
+import { EXPERIMENTS, experimentById } from "../experiments/definitions.js";
+import { ExperimentRunner } from "../experiments/runner.js";
 import { drawSeries, seriesRange } from "../visualization/timeseries.js";
 import { describeSource } from "../sources/kinds.js";
 import {
@@ -74,7 +76,7 @@ import {
   assessField, classifyRunFailure, isUnprojectedInitialCondition,
 } from "./fieldHealth.js";
 import { ValidationPanel } from "./validationPanel.js";
-import { compact, exponential, fixed, integer, isBad } from "./format.js";
+import { compact, exponential, fixed, integer, isBad, show } from "./format.js";
 
 // Where a sample was taken, and what it says. Split so the probe list can put
 // them on separate lines while the hover readout keeps them on one.
@@ -142,6 +144,11 @@ const TOOL_ICONS = {
 
 const STEPS_PER_FRAME = 4;
 const FRAME_BUDGET_MS = 24;
+// While an experiment runs, stepping matters more than repainting: its answer
+// is a measurement at the end, not the picture on the way. So a frame may take
+// more steps and more time - the picture still updates several times a second.
+const EXPERIMENT_STEPS_PER_FRAME = 40;
+const EXPERIMENT_FRAME_BUDGET_MS = 90;
 
 // Width of the boundary-condition bands, and the margin they live in. The
 // bands sit BESIDE the field, not over its edge: the outermost cells carry the
@@ -207,6 +214,7 @@ export class Harness {
     this.brush = new BrushController({
       getLayout: () => this.layout(),
       onChange: (source) => {
+        if (source !== null) this.interruptExperiment("a brush stroke changed the flow");
         if (this.session.setBrushSource(source)) this.draw();
       },
     });
@@ -233,7 +241,10 @@ export class Harness {
     const { root } = this;
     root.querySelector("#run").addEventListener("click", () => this.run());
     root.querySelector("#pause").addEventListener("click", () => this.pause());
-    root.querySelector("#reset").addEventListener("click", () => this.load(this.scenarioId));
+    root.querySelector("#reset").addEventListener("click", () => {
+      this.interruptExperiment("Reset was pressed");
+      this.load(this.scenarioId);
+    });
     root.querySelector("#reseed").addEventListener("click", () => this.seedTracer());
     root.querySelector("#cleardye").addEventListener("click", () => this.clearTracer());
 
@@ -246,6 +257,7 @@ export class Harness {
     }
     select.value = this.scenarioId;
     select.addEventListener("change", () => {
+      this.interruptExperiment("the scenario was changed by hand");
       this.scenarioId = select.value;
       this.load(this.scenarioId);
     });
@@ -292,6 +304,7 @@ export class Harness {
 
     this.bindDrawingControls();
     this.bindBoundaryControls();
+    this.bindExperimentControls();
   }
 
   // The boundary editor. Unlike a geometry edit this does NOT stop the run or
@@ -402,6 +415,7 @@ export class Harness {
   commitBoundary(apply) {
     try {
       if (!apply()) return false;
+      this.interruptExperiment("a boundary condition was edited");
     } catch (error) {
       // The editor validates by compiling, so an impossible specification is
       // refused with the compiler's own message and the history is untouched.
@@ -544,7 +558,10 @@ export class Harness {
       });
     }
     root.querySelector("#clearsources").addEventListener("click", () => {
-      if (this.session.clearSources()) this.draw();
+      if (this.session.clearSources()) {
+        this.interruptExperiment("the sources were changed");
+        this.draw();
+      }
     });
 
     this.bindProbeControls();
@@ -691,6 +708,7 @@ export class Harness {
       return false;
     }
     if (!changed) return false;
+    this.interruptExperiment("the geometry was edited");
     this.stopLoop();
     this.state = "paused";
     this.failure = null;
@@ -711,6 +729,7 @@ export class Harness {
       // different Reynolds number says so rather than letting "benchmarked"
       // stand beside a flow in another regime.
       scenarioRe: this.scenario.Re ?? null,
+      defaultRe: this.scenario.defaultRe ?? null,
     });
   }
 
@@ -806,7 +825,14 @@ export class Harness {
     canvas.width = grid.nx * scale + 2 * MARGIN;
     canvas.height = grid.ny * scale + 2 * MARGIN;
     canvas.classList.toggle("cells", !this.smooth);
-    this.root.querySelector("#scenariotitle").textContent = this.scenario.label;
+    // The label names the scenario, and its Reynolds number is part of the
+    // name - so when a run overrides Re, the title says so. During a sweep it
+    // read "Lid-driven cavity (Re 1000)" over a run at Re 100.
+    const { Re, defaultRe } = this.scenario;
+    this.root.querySelector("#scenariotitle").textContent =
+      Number.isFinite(defaultRe) && Re !== defaultRe
+        ? `${this.scenario.label} \u2014 running at Re ${integer(Re)}`
+        : this.scenario.label;
   }
 
   // Dye controls only ever touch the tracer. They do not reset the run: the
@@ -848,14 +874,26 @@ export class Harness {
     // the run. A stability failure is an exception, not a status code, so it
     // is caught here and turned into the same hard stop as a non-finite field.
     let stepsThisFrame = 0;
+    const experimenting = this.experiment?.state === "running";
+    const maxSteps = experimenting ? EXPERIMENT_STEPS_PER_FRAME : STEPS_PER_FRAME;
+    const budget = experimenting ? EXPERIMENT_FRAME_BUDGET_MS : FRAME_BUDGET_MS;
     try {
-      for (let n = 0; n < STEPS_PER_FRAME; n++) {
+      for (let n = 0; n < maxSteps; n++) {
         // One session step: it chooses the timestep from the field, runs the
         // solver, and advects the tracer on the field the solver just
         // produced. It refuses outright if the geometry moved underneath it.
         this.session.advance();
         stepsThisFrame++;
-        if (performance.now() - started > FRAME_BUDGET_MS) break;
+        // The experiment decides after every step - not every frame - so a
+        // run ends on the step its condition was met, whatever the frame rate.
+        if (experimenting && this.experiment.state === "running") {
+          const outcome = this.experiment.afterStep();
+          if (outcome !== "continue") {
+            this.onExperimentOutcome(outcome);
+            break;
+          }
+        }
+        if (performance.now() - started > budget) break;
       }
     } catch (error) {
       // The decision about what an error MEANS is a pure function in
@@ -868,6 +906,7 @@ export class Harness {
       // An unrecognised error is rethrown. A catch-all here would dress a
       // programming mistake up as a physical failure.
       if (failure === null) throw error;
+      if (this.experiment?.state === "running") this.experiment.fail(failure.message);
       this.state = "failed";
       this.stopLoop();
       this.failure = failure.message;
@@ -1048,6 +1087,7 @@ export class Harness {
     this.updateSourcePanel();
     this.updateProbePanel();
     this.updateAnalysisPanel();
+    if (this.experiment) this.updateExperimentPanel();
     this.updateBoundaryPanel();
     this.updateGeometryPanel();
     this.updateLegend(view);
@@ -1255,6 +1295,7 @@ export class Harness {
     };
     try {
       this.session.addSource(source);
+      this.interruptExperiment("a source was placed");
     } catch (error) {
       // A source covering no updatable face is refused by the compiler with a
       // reason - most often placed inside a wall - and saying so beats a click
@@ -1358,6 +1399,199 @@ export class Harness {
     node.textContent = parts.length === 0
       ? "none - streamlines are tangent to the field now, pathlines are where parcels have been"
       : parts.join("  -  ");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Experiments (M10)
+  // ---------------------------------------------------------------------------
+
+  bindExperimentControls() {
+    const { root } = this;
+    const select = root.querySelector("#experiment");
+    for (const experiment of EXPERIMENTS) {
+      const option = document.createElement("option");
+      option.value = experiment.id;
+      option.textContent = experiment.title;
+      select.appendChild(option);
+    }
+    select.addEventListener("change", () => this.describeExperiment());
+    this.experiment = null;
+    root.querySelector("#expstart").addEventListener("click", () => this.startExperiment(select.value));
+    root.querySelector("#expstop").addEventListener("click", () => {
+      if (this.experiment?.state !== "running") return;
+      this.experiment.stop();
+      this.pause();
+      this.updateExperimentPanel();
+    });
+    this.describeExperiment();
+    this.updateExperimentPanel();
+  }
+
+  describeExperiment() {
+    const experiment = experimentById(this.root.querySelector("#experiment").value);
+    if (experiment === null) return;
+    this.root.querySelector("#expquestion").textContent = experiment.question;
+    this.root.querySelector("#expmethod").textContent = experiment.method;
+    this.root.querySelector("#expreference").textContent = `Reference: ${experiment.reference}`;
+  }
+
+  startExperiment(id) {
+    const experiment = experimentById(id);
+    if (experiment === null) return false;
+    this.stopLoop();
+    this.experiment = new ExperimentRunner(experiment, this.session, {
+      onRunStart: (run) => this.beginExperimentRun(run),
+    });
+    this.experiment.start();
+    this.state = "running";
+    this.updateExperimentPanel();
+    this.tick();
+    return true;
+  }
+
+  // Sets up one run the way a person would: load the scenario, set its
+  // Reynolds number, choose the view. Everything is rebuilt through the
+  // ordinary paths so the panels describe the run actually happening.
+  beginExperimentRun(run) {
+    this.loadingForExperiment = true;
+    try {
+      this.scenarioId = run.scenario;
+      this.root.querySelector("#scenario").value = run.scenario;
+      this.load(run.scenario);
+      if (run.Re !== undefined) {
+        this.session.setReynolds(run.Re);
+        this.syncScenario();
+        this.renderValidation();
+      }
+    } finally {
+      this.loadingForExperiment = false;
+    }
+    if (run.view?.mode) this.setMode(run.view.mode);
+    for (const [name, on] of Object.entries(run.view?.overlays ?? {})) {
+      this.overlays[name] = on;
+      const box = this.root.querySelector(`#show${name}`);
+      if (box) box.checked = on;
+    }
+    // load() leaves the harness paused; an experiment run is running.
+    this.state = "running";
+  }
+
+  onExperimentOutcome(outcome) {
+    if (outcome === "finished" || outcome === "failed") {
+      this.state = this.state === "failed" ? "failed" : "paused";
+      this.stopLoop();
+    }
+    this.updateExperimentPanel();
+  }
+
+  // Anything a person does that changes the flow invalidates the run being
+  // measured, so the experiment stops and says why rather than reporting a
+  // number for a flow it did not set up.
+  interruptExperiment(reason) {
+    if (this.loadingForExperiment) return;
+    if (this.experiment?.state !== "running") return;
+    this.experiment.stop();
+    // Kept on the runner, not in a one-shot field the panel consumes: the
+    // panel repaints every frame, and the first version cleared the reason on
+    // the first paint, so the next one replaced "stopped: you pressed Reset"
+    // with the generic message.
+    this.experiment.interruptedBy = reason;
+    this.updateExperimentPanel();
+  }
+
+  updateExperimentPanel() {
+    const { root } = this;
+    const runner = this.experiment ?? null;
+    const status = root.querySelector("#expstatus");
+    const bar = root.querySelector("#expbar");
+    const results = root.querySelector("#expresults");
+    const summary = root.querySelector("#expsummary");
+    root.querySelector("#expstop").disabled = runner?.state !== "running";
+    root.querySelector("#expstart").disabled = runner?.state === "running";
+    status.classList.remove("bad");
+    if (runner === null) {
+      status.textContent = "choose an experiment and press Start";
+      bar.style.width = "0%";
+      return;
+    }
+    const progress = runner.progress();
+    if (runner.state === "running" && progress !== null) {
+      bar.style.width = `${(progress.fraction * 100).toFixed(1)}%`;
+      const condition = progress.target !== null
+        ? `change rate ${compact(progress.changeRate)} (steady below ${compact(progress.target)})`
+        : progress.sampling
+          ? `averaging: ${integer(progress.samples)} samples`
+          : "start-up transient, not yet sampling";
+      status.textContent =
+        `run ${progress.run} of ${progress.of}: ${progress.label} - t = ${fixed(progress.time, 1)} ` +
+        `of ${fixed(progress.limit, 0)} - ${condition}`;
+    } else if (runner.state === "finished") {
+      bar.style.width = "100%";
+      status.textContent = `finished - ${runner.results.length} runs`;
+    } else if (runner.state === "stopped") {
+      status.textContent = runner.interruptedBy
+        ? `stopped: ${runner.interruptedBy}. Nothing is reported for a flow the experiment did not set up.`
+        : "stopped before it finished; partial runs are not reported";
+      status.classList.add("bad");
+    } else if (runner.state === "failed") {
+      status.textContent = `failed: ${runner.failure}`;
+      status.classList.add("bad");
+    }
+
+    // Results, once they exist, drawn once per change rather than per frame.
+    const signature = `${runner.state}:${runner.results.length}`;
+    if (results.dataset.builtFor === signature) return;
+    results.dataset.builtFor = signature;
+    results.innerHTML = "";
+    summary.textContent = "";
+    if (runner.state !== "finished" || runner.conclusion === null) return;
+
+    // One block per result - the quantity, then measured against reference
+    // and the verdict - rather than a four-column table, which wrapped every
+    // label to four lines in a sidebar.
+    for (const row of runner.conclusion.rows) {
+      const item = document.createElement("div");
+      item.className = "expitem";
+      item.title = row.note ?? "";
+      const name = document.createElement("div");
+      name.className = "expq";
+      name.textContent = row.quantity;
+      const values = document.createElement("div");
+      values.className = "expv";
+      const measured = document.createElement("span");
+      measured.className = "num";
+      measured.textContent = show(row.measured);
+      const reference = document.createElement("span");
+      reference.className = "num ref";
+      reference.textContent = `ref ${show(row.reference)}`;
+      const verdict = document.createElement("span");
+      verdict.className = row.status === "agrees" ? "agrees" : row.status === "differs" ? "differs" : "neutral";
+      verdict.textContent = row.status;
+      values.append(measured, reference, verdict);
+      item.append(name, values);
+      if (row.note) {
+        const note = document.createElement("div");
+        note.className = "expnote";
+        note.textContent = row.note;
+        item.appendChild(note);
+      }
+      results.appendChild(item);
+    }
+
+    // Each run in one line: how it ended. A capped run says NOT steady.
+    const runs = document.createElement("div");
+    runs.className = "runs";
+    for (const run of runner.results) {
+      const line = document.createElement("div");
+      const ending = run.steady === undefined
+        ? `averaged over ${integer(run.sampleCount)} samples`
+        : run.steady ? `steady (rate ${compact(run.changeRate)})` : `NOT steady - capped at rate ${compact(run.changeRate)}`;
+      line.textContent = `${run.label}: ${integer(run.steps)} steps, t = ${fixed(run.time, 1)}, ${ending}`;
+      if (run.steady === false) line.className = "notsteady";
+      runs.appendChild(line);
+    }
+    results.appendChild(runs);
+    summary.textContent = runner.conclusion.summary;
   }
 
   // ---------------------------------------------------------------------------
@@ -1720,6 +1954,7 @@ export class Harness {
       drop.textContent = "remove";
       drop.addEventListener("click", () => {
         session.removeSource(index);
+        this.interruptExperiment("a source was removed");
         this.draw();
       });
       row.append(label, text, drop);
@@ -1914,8 +2149,16 @@ export class Harness {
       return;
     }
     const cssPerUnit = (this.scale / this.scenario.grid.h) * (rect.width / canvas.width);
-    line.style.width = `${Math.max(8, reference.L * cssPerUnit)}px`;
-    label.textContent = `${reference.length} = ${compact(reference.L)}`;
+    // The largest simple fraction of the reference length that fits in about
+    // 150 CSS pixels. The whole length did not always fit: the cavity's side is
+    // the whole canvas, and a scale bar that wide squeezed the legend beside it.
+    const fractions = [1, 0.5, 0.25, 0.2, 0.1, 0.05];
+    const fraction = fractions.find((f) => reference.L * f * cssPerUnit <= 150) ?? 0.05;
+    const length = reference.L * fraction;
+    line.style.width = `${Math.max(8, length * cssPerUnit)}px`;
+    label.textContent = fraction === 1
+      ? `${reference.length} = ${compact(reference.L)}`
+      : `${compact(fraction)} x ${reference.length} = ${compact(length)}`;
   }
 
   // The continuity error after every solver step, on a log axis with the

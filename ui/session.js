@@ -84,6 +84,11 @@ export class SimulationSession {
     this.placedSources = scenario.sources ?? [];
     this.brushSource = null;
     this.#rebuildSources();
+    // Parameter overrides - the Reynolds number an experiment asks for, and in
+    // M12 the fluid's properties. Kept across reset() like boundary edits,
+    // because they describe the run rather than the flow's state; discarded by
+    // load(), because they were chosen for one scenario.
+    this.overrides = {};
     // Created before reset(), which clears their history.
     this.probes = new ProbeSet();
     this.residuals = new ResidualHistory();
@@ -226,6 +231,7 @@ export class SimulationSession {
     // actually be in force. Applying it after would leave cells the edit
     // exposes holding whatever their slots contained.
     this.scenario = buildScenario(this.scenarioId, this.editor.document);
+    this.#applyOverrides();
     this.tracer = new PassiveTracer(this.scenario.grid);
     // Rebuilt rather than carried over: the particles are positions in a
     // domain, and a geometry edit is exactly the case where some of those
@@ -244,6 +250,13 @@ export class SimulationSession {
 
     this.iteration = 0;
     this.simulatedTime = 0;
+    // How fast the field is still changing: max |du|, |dv| over one step,
+    // divided by that step's dt. Measured every step so "steady" is a number
+    // rather than a guess - the M2 cavity benchmark declares steady state the
+    // same way. Infinity until two fields exist to compare.
+    this.changeRate = Infinity;
+    this.previousU = new Float64Array(this.scenario.grid.u.length);
+    this.previousV = new Float64Array(this.scenario.grid.v.length);
     this.lastTimestep = null;
     this.lastSelection = null;
     this.lastStep = null;
@@ -362,7 +375,10 @@ export class SimulationSession {
     // params alone and saw no sources at all. The panel then reported a
     // continuity error of 3.20e-1 next to a raw divergence of 7.8e-8, which is
     // the signature of a source that is being displayed and not applied.
+    this.previousU.set(grid.u);
+    this.previousV.set(grid.v);
     this.lastStep = step(grid, bc, { ...params, dt: selection.dt, sources });
+    this.changeRate = this.#measureChangeRate(grid, selection.dt);
     this.iteration++;
     this.simulatedTime += selection.dt;
     this.residuals.record(this.iteration, this.lastStep);
@@ -386,6 +402,61 @@ export class SimulationSession {
     return this.lastStep;
   }
 
+  // Runs this scenario at a different Reynolds number, by changing the
+  // viscosity through the scenario's own declared reference scale:
+  // nu = U * L / Re. Nothing else moves - the geometry, the boundary
+  // conditions and the reference speed are the scenario's - so the run is the
+  // same flow at a different Re, which is what a Reynolds sweep means.
+  //
+  // Applied through reset(), because a new viscosity is a different problem
+  // and the field from the old one is not a valid state of it. Passing null
+  // returns to the scenario's own value.
+  setReynolds(Re) {
+    if (Re !== null && !(Number.isFinite(Re) && Re > 0)) {
+      throw new RangeError(`a Reynolds number must be positive and finite, got ${Re}`);
+    }
+    // nu = U*L/Re is only the requested Re when U does not itself depend on nu.
+    // In a pressure-driven flow it does (U = dp*w^2/(12*mu*L)), so the formula
+    // would land somewhere else entirely - refused rather than mislabelled.
+    if (Re !== null && this.scenario.reference.speedSetByViscosity) {
+      throw new RangeError(
+        `"${this.scenarioId}" has no imposed speed - its ${this.scenario.reference.speed} ` +
+        `changes with the viscosity - so its Reynolds number cannot be set by the viscosity alone`
+      );
+    }
+    if (Re === null) delete this.overrides.Re;
+    else this.overrides.Re = Re;
+    this.running = false;
+    this.reset();
+    return true;
+  }
+
+  #applyOverrides() {
+    const scenario = this.scenario;
+    scenario.defaultRe = scenario.Re;
+    const Re = this.overrides.Re;
+    if (Re === undefined) return;
+    const { U, L } = scenario.reference;
+    scenario.params = { ...scenario.params, nu: (U * L) / Re };
+    scenario.Re = Re;
+  }
+
+  #measureChangeRate(grid, dt) {
+    const { u, v } = grid;
+    const pu = this.previousU;
+    const pv = this.previousV;
+    let worst = 0;
+    for (let k = 0; k < u.length; k++) {
+      const du = Math.abs(u[k] - pu[k]);
+      const dv = Math.abs(v[k] - pv[k]);
+      // A NaN anywhere makes the rate NaN rather than being skipped by a bare
+      // comparison - a broken field is not a steady one.
+      if (!(du <= worst)) worst = du;
+      if (!(dv <= worst)) worst = dv;
+    }
+    return worst / dt;
+  }
+
   // Switching scenario keeps nothing: a document drawn against one domain has
   // no meaning in another of a different size and shape.
   load(scenarioId) {
@@ -401,6 +472,7 @@ export class SimulationSession {
     // Sources and probes describe places in a particular domain, so a scenario
     // change discards them exactly as it discards a geometry document.
     this.probes.clear();
+    this.overrides = {};
     this.placedSources = scenario.sources ?? [];
     this.brushSource = null;
     this.#rebuildSources();

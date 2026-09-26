@@ -49,3 +49,17 @@ export function compact(value) {
   }
   return value.toExponential(2);
 }
+
+// A result value in the experiment panel: four significant figures, trailing
+// zeros kept, so 1.0033 reads "1.003" rather than compact()'s "1" - the digits
+// are the answer there. A value an experiment already formatted (a coordinate
+// pair, a mean with its spread) is text and is shown as given.
+export function show(value) {
+  if (typeof value === "string") return value;
+  if (typeof value !== "number") return "not a number";
+  if (!Number.isFinite(value)) return exponential(value);
+  if (value === 0) return "0";
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1e-3 && magnitude < 1e5) return value.toPrecision(4);
+  return value.toExponential(3);
+}

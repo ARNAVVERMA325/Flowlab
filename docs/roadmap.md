@@ -242,6 +242,13 @@ Not scheduled. Do not start any of these while a NOW milestone is open.
   from, and a test asserts Re = U·L/ν.*
 - **M10 — Experiment mode**: guided scenarios — pipe flow, flow around a cylinder, sharp vs.
   smooth bend, Reynolds-number sweep
+  *Built — see `docs/M10-experiments.md`. A run ends **steady** (measured change rate
+  below a tolerance on U²/L; a run that hits its time cap is reported NOT steady) or
+  **averaged** over a window with its spread — the bends never settle at Re 200. The
+  Reynolds override ν = UL/Re is **refused for the pressure-driven channel**, whose
+  speed is itself set by ν. Pipe agrees with Poiseuille to 1% on all three measures; the
+  sweep puts every vortex centre within 0.6 cells of Ghia; the cylinder is comparison
+  only (18% blockage, unverified unbounded reference).*
 - **M11 — Equation explorer**: governing equations in the UI; click a term
   (`∂u/∂t`, `u·∇u`, `−∇p`, `μ∇²u`, `f`) to get an explanation *and* a highlight of where
   that effect currently dominates

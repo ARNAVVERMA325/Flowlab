@@ -310,6 +310,24 @@
   /* The validation record is a five-column table; in a sidebar it scrolls
      sideways rather than pushing its last column off the card. */
   #vdetail { overflow-x: auto; }
+  .expbar { height: 6px; border-radius: 3px; background: var(--panel-hi); margin-top: 10px; overflow: hidden; }
+  #expbar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), #22d3ee); transition: width .2s; }
+  #expresults table { width: 100%; border-collapse: collapse; font-size: 11.5px; margin-top: 8px; }
+  #expresults th { text-align: left; color: var(--ink-dim); font-weight: 600; padding: 3px 0; }
+  #expresults td { padding: 3px 0; vertical-align: top; }
+  #expresults td + td, #expresults th + th { padding-left: 8px; }
+  #expresults .num { font-family: var(--mono); white-space: nowrap; }
+  #expresults .agrees { color: var(--good); }
+  #expresults .differs, #expresults .notsteady { color: var(--bad); }
+  .expitem { padding: 7px 0; border-top: 1px solid var(--line); }
+  .expitem:first-child { margin-top: 8px; }
+  .expq { font-size: 12px; }
+  .expv { display: flex; gap: 10px; align-items: baseline; margin-top: 2px; font-size: 12px; }
+  .expv .ref { color: var(--ink-dim); }
+  .expv span:last-child { margin-left: auto; font-size: 11px; }
+  .expv .neutral { color: var(--ink-faint); }
+  .expnote { color: var(--ink-faint); font-size: 11px; margin-top: 2px; }
+  #expresults .runs { color: var(--ink-faint); font-family: var(--mono); font-size: 11px; margin-top: 8px; }
   #vdetail .vtable { font-size: 11px; }
 
   @media (max-width: 1180px) {
@@ -595,6 +613,24 @@
 
   <!-- ============================================================= right -->
   <aside class="sidebar right">
+    <section class="card" id="experimentcard">
+      <h2>Experiments</h2>
+      <select id="experiment" aria-label="Experiment" style="width:100%"></select>
+      <p id="expquestion" class="vnote"></p>
+      <details><summary>Method and reference</summary>
+        <p id="expmethod" class="vnote"></p>
+        <p id="expreference" class="vnote"></p>
+      </details>
+      <div class="row">
+        <button id="expstart">Start experiment</button>
+        <button id="expstop">Stop</button>
+      </div>
+      <div class="expbar"><div id="expbar"></div></div>
+      <p id="expstatus" class="vnote">-</p>
+      <div id="expresults"></div>
+      <p id="expsummary" class="vnote"></p>
+    </section>
+
     <section class="card">
       <h2>Probes <span class="spacer"></span><button id="addprobe" title="Arm the probe tool, then click the field">+ Add probe</button></h2>
       <p class="drawstatus" id="probehover">-</p>

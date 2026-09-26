@@ -32,7 +32,7 @@ import {
   maxAbsDifference,
 } from "../tests/support/cavity.js";
 import { Y, U_CENTRELINE, X, V_CENTRELINE, PRIMARY_VORTEX_CENTRE, isExcluded }
-  from "../tests/support/ghia.js";
+  from "./ghia.js";
 import {
   runCylinderToSteadyState,
   wakeBubbleLength,

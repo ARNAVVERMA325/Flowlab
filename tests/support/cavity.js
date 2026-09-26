@@ -146,33 +146,11 @@ export function vAlongHorizontalCentreline(grid, targetX) {
   return targetX.map((x) => interpolate(xs, vs, x));
 }
 
-// Centre of the primary vortex: the interior stagnation point, located as
-// the cell of minimum speed. The search excludes the outer band of the
-// cavity, because the weak secondary eddies in the bottom corners are also
-// stagnant and would otherwise win on a coarse grid.
-export function primaryVortexCentre(grid) {
-  const { nx, ny, h } = grid;
-  let best = Infinity;
-  let bx = 0;
-  let by = 0;
-  for (let j = 1; j <= ny; j++) {
-    const y = (j - 0.5) * h;
-    if (y < 0.3 || y > 0.95) continue;
-    for (let i = 1; i <= nx; i++) {
-      const x = (i - 0.5) * h;
-      if (x < 0.15 || x > 0.9) continue;
-      const uc = (grid.u[grid.idx(i - 1, j)] + grid.u[grid.idx(i, j)]) / 2;
-      const vc = (grid.v[grid.idx(i, j - 1)] + grid.v[grid.idx(i, j)]) / 2;
-      const speed = Math.hypot(uc, vc);
-      if (speed < best) {
-        best = speed;
-        bx = x;
-        by = y;
-      }
-    }
-  }
-  return { x: bx, y: by, speed: best };
-}
+// Centre of the primary vortex. Moved to physics/features.js in M10 so the
+// app's experiments use the very measurement the Ghia comparison is built on;
+// this re-export keeps every existing caller - and the validated numbers -
+// on the one definition.
+export { primaryVortexCentre } from "../../physics/features.js";
 
 export function maxAbsDifference(a, b) {
   let m = 0;
