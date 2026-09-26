@@ -1703,4 +1703,89 @@ describe("browser", { skip }, () => {
       assert.equal(await page.evaluate(() => window.__flowlab.session.iteration), iteration, "exporting never steps");
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Performance (M14)
+  // -------------------------------------------------------------------------
+
+  test("with the solver in a worker the page keeps drawing, and the flow is the same bytes", async () => {
+    // The same cylinder run twice - once in the worker (the default), once on
+    // this thread - measuring the gaps between animation frames while it runs.
+    const measure = async (query) => {
+      const app = await openApp(browser, server.url + query);
+      const { page } = app;
+      try {
+        await page.selectOption("#scenario", "cylinder");
+        await page.waitForTimeout(300);
+        await page.evaluate(() => {
+          window.__gaps = [];
+          let last = performance.now();
+          const loop = () => {
+            const now = performance.now();
+            window.__gaps.push(now - last);
+            last = now;
+            if (!window.__stopGaps) requestAnimationFrame(loop);
+          };
+          requestAnimationFrame(loop);
+        });
+        await page.click("#run");
+        await page.waitForFunction(() => window.__flowlab.session.iteration >= 20, null, { timeout: 60000 });
+        await page.click("#pause");
+        await page.waitForTimeout(200);
+        const result = await page.evaluate(async () => {
+          window.__stopGaps = true;
+          const gaps = window.__gaps.slice(5).sort((a, b) => a - b);
+          const h = window.__flowlab;
+          // Stepped here, directly, to the same step count.
+          const { SimulationSession } = await import("/ui/session.js");
+          const fresh = new SimulationSession("cylinder");
+          for (let k = 0; k < h.session.iteration; k++) fresh.advance();
+          const same = (a, b) => a.length === b.length && a.every((x, k) => Object.is(x, b[k]));
+          return {
+            p95: gaps[Math.floor(gaps.length * 0.95)],
+            where: document.querySelector("#computewhere").textContent,
+            identical: ["u", "v", "p"].every((f) => same(h.session.grid[f], fresh.grid[f])) && same(h.session.tracer.c, fresh.tracer.c),
+            residuals: h.session.residuals.length,
+            iteration: h.session.iteration,
+          };
+        });
+        app.assertNoErrors(query || "worker");
+        return result;
+      } finally {
+        await page.close();
+      }
+    };
+    const worker = await measure("");
+    const main = await measure("?compute=main");
+    assert.equal(worker.where, "CPU, Web Worker");
+    assert.equal(main.where, "main thread (requested)");
+    assert.ok(worker.identical, "the worker's flow is byte-identical to stepping on this thread");
+    assert.ok(main.identical);
+    assert.equal(worker.residuals, worker.iteration, "one chart point per step, from the worker's records");
+    assert.ok(worker.p95 < main.p95 / 2,
+      `frames keep coming: p95 gap ${worker.p95.toFixed(0)} ms with the worker, ${main.p95.toFixed(0)} ms without`);
+  });
+
+  test("the display resolution adapts, and the simulation's never does", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      const before = await page.evaluate(() => {
+        const h = window.__flowlab;
+        h.draw();
+        return { sub: h.renderer.lastSubsample, nx: h.session.grid.nx };
+      });
+      const after = await page.evaluate(() => {
+        const h = window.__flowlab;
+        h.renderer.pixelBudget = 15000;
+        h.draw();
+        return { sub: h.renderer.lastSubsample, nx: h.session.grid.nx, buffer: h.renderer.buffer.width };
+      });
+      assert.ok(after.sub < before.sub, `${before.sub} -> ${after.sub} px/cell`);
+      assert.equal(after.buffer, after.nx * after.sub);
+      assert.equal(after.nx, before.nx, "the grid is untouched");
+      await runForSteps(page, 5);
+      assert.match(await page.textContent("#perf"), /-|render [\d.]+ ms at \d+ px\/cell/);
+    });
+  });
 });

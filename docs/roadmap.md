@@ -275,6 +275,15 @@ Not scheduled. Do not start any of these while a NOW milestone is open.
   Exports are full precision (every value round-trips with ===) and write NaN as NaN.*
 - **M14 — Performance**: Web Workers, WebGL/WebGPU, adaptive resolution. UI must stay
   responsive; the sim loop must never freeze the app
+  *Built — see `docs/M14-performance.md`. Measured first: a cylinder step is 92–168 ms
+  against a 24 ms frame, drawing at most 9.4 ms — so the solver moved to a **Web Worker**
+  (p95 frame gap 114–142 ms → 20–24 ms, click-to-effect 1.3 s → 0.1 s, ~8% throughput
+  spent on the handoff), proved **byte-identical** to main-thread stepping with edits made
+  mid-run; the smooth renderer's **display** resolution adapts to its own frame time. Not
+  built, on the measurements: WebGL rendering (drawing already fits the frame); a GPU
+  solver or preconditioned pressure solve is the biggest remaining speed-up but changes
+  the arithmetic and the golden fields — **flagged for a decision**. Experiments still
+  step on the main thread (known gap).*
 
 ---
 

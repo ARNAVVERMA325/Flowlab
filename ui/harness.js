@@ -79,6 +79,7 @@ import {
 } from "../visualization/fieldSources.js";
 import { SCENARIOS, DEFAULT_SCENARIO } from "../scenarios/index.js";
 import { SimulationSession, StaleFieldError } from "./session.js";
+import { RemoteStepper, forwardingSession } from "./remoteStepper.js";
 import {
   assessField, classifyRunFailure, isUnprojectedInitialCondition,
 } from "./fieldHealth.js";
@@ -208,6 +209,20 @@ export class Harness {
     this.palette = DEFAULT_MAGNITUDE_RAMP;
     // Frames and steps per second, for the status bar.
     this.perf = { frames: 0, steps: 0, since: performance.now(), fps: null, sps: null };
+    // M14: where the solver runs. In a Web Worker wherever module workers are
+    // available, so the page keeps drawing and answering input however slow a
+    // step is; on this thread otherwise, or when ?compute=main asks for it.
+    // Experiments always step here - the runner decides after every single
+    // step, and batching them would end a run on the wrong one.
+    const forced = new URLSearchParams(globalThis.location?.search ?? "").get("compute");
+    this.compute = forced === "main" || typeof Worker === "undefined" ? "main" : "worker";
+    this.computeNote = forced === "main" ? "main thread (requested)" : null;
+    this.stepper = this.compute !== "worker" ? null : new RemoteStepper({
+      createWorker: () => new Worker(new URL("./solverWorker.js", import.meta.url), { type: "module" }),
+      onBatch: (reply) => this.onWorkerBatch(reply),
+      onFault: (message) => this.onWorkerFault(message),
+    });
+    this.workerSteps = 0;
     // Probe display state. The probes themselves live in the session, which is
     // what samples them; these three are only about what is being looked at.
     this.hoverPoint = null;
@@ -785,7 +800,10 @@ export class Harness {
     // draws it, rather than keeping a second copy of that state which could
     // disagree about whether a field is still valid.
     if (this.session) this.session.load(id);
-    else this.session = new SimulationSession(id);
+    else {
+      const session = new SimulationSession(id);
+      this.session = this.stepper === null ? session : forwardingSession(session, this.stepper);
+    }
     this.failure = null;
     this.failureKind = null;
     this.state = "paused";
@@ -856,12 +874,14 @@ export class Harness {
     if (!this.session || !this.tracerConfig.seeded) return;
     this.tracer.clear();
     this.tracer.seed(this.scenario.grid, this.tracerConfig.seed);
+    this.stepper?.markTracerDirty();
     this.draw();
   }
 
   clearTracer() {
     if (!this.session) return;
     this.tracer.clear();
+    this.stepper?.markTracerDirty();
     this.draw();
   }
 
@@ -876,6 +896,7 @@ export class Harness {
   }
 
   pause() {
+    this.stepper?.stop();
     this.stopLoop();
     if (this.state === "running") this.state = "paused";
     if (this.scenario) this.draw();
@@ -884,6 +905,25 @@ export class Harness {
   tick() {
     if (this.state !== "running") return;
     const started = performance.now();
+
+    // In worker mode the solver is elsewhere: this frame only draws whatever
+    // state last arrived. The stepper is (re)started whenever it is idle - at
+    // Run, and after anything that reset the field, which made it stale.
+    if (this.stepper !== null && this.compute === "worker" && this.experiment?.state !== "running") {
+      if (!this.stepper.active) this.stepper.start(this.session);
+      const steps = this.workerSteps;
+      this.workerSteps = 0;
+      // Repainted only when a batch has landed. Redrawing an unchanged state
+      // sixty times a second took CPU from the worker: measured on the
+      // cylinder, the worker managed 49 steps in the time the main thread
+      // alone managed 84. Every interaction draws for itself, so nothing waits
+      // on this.
+      if (steps > 0) this.draw();
+      this.countFrame(steps);
+      if (this.state === "running") this.frame = requestAnimationFrame(() => this.tick());
+      return;
+    }
+    this.stepper?.stop();
 
     // The timestep is chosen from the field before every step, not fixed for
     // the run. A stability failure is an exception, not a status code, so it
@@ -911,28 +951,55 @@ export class Harness {
         if (performance.now() - started > budget) break;
       }
     } catch (error) {
-      // The decision about what an error MEANS is a pure function in
-      // ui/fieldHealth.js, not a list of instanceof checks inlined in a frame
-      // callback. It went wrong there once - M5 made a rejected geometry
-      // producible from the UI, SolverGeometryError was not in the list, and the
-      // exception escaped into the animation loop - and a decision reachable
-      // only from a browser is a decision node tests cannot ask about.
-      const failure = classifyRunFailure(error, RUN_FAILURE_KINDS);
-      // An unrecognised error is rethrown. A catch-all here would dress a
-      // programming mistake up as a physical failure.
-      if (failure === null) throw error;
-      if (this.experiment?.state === "running") this.experiment.fail(failure.message);
-      this.state = "failed";
-      this.stopLoop();
-      this.failure = failure.message;
-      this.failureKind = failure.kind;
-      this.draw();
+      this.handleRunError(error);
       return;
     }
 
     this.draw();
     this.countFrame(stepsThisFrame);
     if (this.state === "running") this.frame = requestAnimationFrame(() => this.tick());
+  }
+
+  // The decision about what an error MEANS is a pure function in
+  // ui/fieldHealth.js, not a list of instanceof checks inlined in a frame
+  // callback. It went wrong there once - M5 made a rejected geometry
+  // producible from the UI, SolverGeometryError was not in the list, and the
+  // exception escaped into the animation loop - and a decision reachable only
+  // from a browser is a decision node tests cannot ask about. One path for a
+  // failure on this thread and one reported by the worker.
+  handleRunError(error) {
+    const failure = classifyRunFailure(error, RUN_FAILURE_KINDS);
+    // An unrecognised error is rethrown. A catch-all here would dress a
+    // programming mistake up as a physical failure.
+    if (failure === null) throw error;
+    if (this.experiment?.state === "running") this.experiment.fail(failure.message);
+    this.stepper?.stop();
+    this.state = "failed";
+    this.stopLoop();
+    this.failure = failure.message;
+    this.failureKind = failure.kind;
+    this.draw();
+  }
+
+  // A batch from the worker has been installed into the session already (see
+  // RemoteStepper); this counts its steps and turns a reported failure back
+  // into the error it was, so it is classified exactly as one thrown here.
+  onWorkerBatch(reply) {
+    this.workerSteps += reply.steps;
+    if (reply.error === null) return;
+    const kind = Object.values(RUN_FAILURE_KINDS).find((type) => type.name === reply.error.name);
+    const error = kind ? Object.create(kind.prototype) : new Error();
+    error.name = reply.error.name;
+    error.message = reply.error.message;
+    if (reply.error.details !== null) error.details = reply.error.details;
+    this.handleRunError(error);
+  }
+
+  // The worker could not reproduce the app's state - which should not happen,
+  // and if it does the run carries on here rather than stopping.
+  onWorkerFault(message) {
+    this.compute = "main";
+    this.computeNote = `main thread - the worker failed: ${message}`;
   }
 
   // Frames and solver steps per second over the last second of running, for
@@ -1093,10 +1160,18 @@ export class Harness {
     chip.dataset.state = this.state;
     chip.textContent = this.state;
     const perf = this.perf;
+    const experimenting = this.experiment?.state === "running";
+    set(
+      "#computewhere",
+      this.computeNote ?? (this.compute === "worker"
+        ? (experimenting ? "CPU, main thread (experiment)" : "CPU, Web Worker")
+        : "CPU, main thread"),
+    );
     set(
       "#perf",
       this.state === "running" && perf.fps !== null
-        ? `${fixed(perf.fps, 0)} fps \u00b7 ${fixed(perf.sps, 0)} steps/s`
+        ? `${fixed(perf.fps, 0)} fps \u00b7 ${fixed(perf.sps, 0)} steps/s` +
+          (this.smooth ? ` \u00b7 render ${fixed(this.renderer.renderAverage ?? 0, 1)} ms at ${this.renderer.lastSubsample} px/cell` : "")
         : "-"
     );
     this.drawResidualChart();

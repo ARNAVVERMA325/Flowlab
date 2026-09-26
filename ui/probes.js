@@ -92,6 +92,16 @@ class SampleRing {
     return Math.min(this.writes, this.capacity);
   }
 
+  // The newest sample as the plain object push() takes - so a sample taken in
+  // a worker can be pushed, unchanged, into the main thread's ring (M14).
+  latest() {
+    if (this.writes === 0) return null;
+    const at = (this.writes - 1) % this.capacity;
+    const sample = {};
+    for (const quantity of TRACKED) sample[quantity] = this.values[quantity][at];
+    return { time: this.time[at], sample };
+  }
+
   push(time, sample) {
     const at = this.writes % this.capacity;
     this.time[at] = time;
@@ -133,6 +143,22 @@ export class ProbeSet {
 
   get probes() { return this._probes; }
   get count() { return this._probes.length; }
+
+  // Takes another set's numbering - ids, labels, colours and the next id -
+  // for probes created in the same order. A worker's copy of the setup must
+  // number its probes as the app does, or readings sent back would land on
+  // the wrong probe (M14).
+  adoptNumbering(ids, nextId) {
+    if (ids.length !== this._probes.length) {
+      throw new RangeError(`${ids.length} ids for ${this._probes.length} probes`);
+    }
+    this._probes.forEach((probe, n) => {
+      probe.id = ids[n];
+      probe.label = `P${ids[n]}`;
+      probe.colour = PROBE_COLOURS[(ids[n] - 1) % PROBE_COLOURS.length];
+    });
+    this.nextId = nextId;
+  }
 
   probeById(id) {
     return this._probes.find((probe) => probe.id === id) ?? null;

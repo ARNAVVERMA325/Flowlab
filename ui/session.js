@@ -266,6 +266,10 @@ export class SimulationSession {
     this.lastStepInputs = null;
     this.budgetCache = null;
     this.lastTracer = null;
+    // Per-step records for a caller that needs every step's side effects
+    // rather than the end state - the solver worker (M14). Null unless asked
+    // for, so ordinary stepping costs nothing extra.
+    this.stepLog = null;
     this.running = false;
     // The field is now consistent with this mask, and with nothing else.
     this.maskVersionAtReset = this.scenario.grid.maskVersion;
@@ -297,6 +301,13 @@ export class SimulationSession {
   // which is the same machinery that refuses it in a scenario definition.
   setBoundary(side, condition) {
     this.boundaries.setSide(side, condition);
+    return true;
+  }
+
+  // The whole boundary specification at once, validated against the grid
+  // like any edit. Used to restore or mirror a setup; see replaceSpec.
+  setBoundarySpec(spec) {
+    this.boundaries.replaceSpec(spec);
     return true;
   }
 
@@ -405,6 +416,13 @@ export class SimulationSession {
     // save by making it conditional. Like the tracer, it reads the field the
     // solver just produced and writes nothing back.
     this.pathlines.advance(grid, selection.dt);
+    if (this.stepLog !== null) {
+      this.stepLog.push({
+        iteration: this.iteration,
+        step: this.lastStep,
+        readings: this.probes.probes.map((probe) => [probe.id, probe.history.latest()]),
+      });
+    }
     this.lastTracer = this.tracer.advect(grid, bc, selection.dt, {
       inject: this.tracerConfig.inject,
       // The dye a source carries is read here and nowhere below the display
@@ -503,9 +521,7 @@ export class SimulationSession {
     for (const operation of project.geometry.operations) this.editor.append(operation);
     // One rebuild for the whole document rather than one per shape.
     this.reset();
-    for (const side of Object.keys(project.boundaries)) {
-      this.boundaries.setSide(side, project.boundaries[side]);
-    }
+    this.setBoundarySpec(project.boundaries);
     this.placedSources = [];
     this.#rebuildSources();
     for (const source of project.sources) this.addSource(source);
@@ -526,6 +542,93 @@ export class SimulationSession {
       h: built.grid.h,
       speedSetByViscosity: Boolean(built.reference.speedSetByViscosity),
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // M14: handing a running flow between threads
+  // ---------------------------------------------------------------------------
+  //
+  // Everything that changes when the solver steps - the fields, the dye, the
+  // pathlines and their random generator, the clocks, the last step's report -
+  // and nothing that describes the SETUP, which both sides already hold (a
+  // worker is given the setup as a project, io/project.js, and mid-run edits as
+  // the same calls the app makes). Plain data and typed arrays, so it survives
+  // postMessage. Copies, so the two sides never share a buffer.
+  // `copy: false` hands over the pathlines and step report by reference - for
+  // a caller that is about to postMessage the result, which clones anyway.
+  // The trails are 300 parcels of objects, and cloning them three times per
+  // batch was most of the worker's 10.6 ms handoff.
+  captureState({ copy = true } = {}) {
+    const { grid, tracer } = this;
+    const own = copy ? structuredClone : (value) => value;
+    return {
+      u: grid.u.slice(),
+      v: grid.v.slice(),
+      p: grid.p.slice(),
+      previousU: this.previousU.slice(),
+      previousV: this.previousV.slice(),
+      tracer: {
+        c: tracer.c.slice(),
+        steps: tracer.steps,
+        lastCFL: tracer.lastCFL,
+        lastSubsteps: tracer.lastSubsteps,
+        lastInjected: tracer.lastInjected,
+      },
+      pathlines: own(this.pathlines.captureState()),
+      iteration: this.iteration,
+      simulatedTime: this.simulatedTime,
+      lastTimestep: this.lastTimestep,
+      lastSelection: own(this.lastSelection),
+      lastStep: own(this.lastStep),
+      lastTracer: own(this.lastTracer),
+      changeRate: this.changeRate,
+      lastStepInputs: own(this.lastStepInputs),
+    };
+  }
+
+  // The inverse. `tracer: false` leaves the dye alone - used when the dye was
+  // changed here while the state being installed was computed elsewhere.
+  installState(state, { tracer = true, owned = false } = {}) {
+    const { grid } = this;
+    if (state.u.length !== grid.u.length) {
+      throw new RangeError(`a ${state.u.length}-entry state does not fit this ${grid.u.length}-entry grid`);
+    }
+    grid.u.set(state.u);
+    grid.v.set(state.v);
+    grid.p.set(state.p);
+    this.previousU.set(state.previousU);
+    this.previousV.set(state.previousV);
+    if (tracer) {
+      this.tracer.c.set(state.tracer.c);
+      this.tracer.steps = state.tracer.steps;
+      this.tracer.lastCFL = state.tracer.lastCFL;
+      this.tracer.lastSubsteps = state.tracer.lastSubsteps;
+      this.tracer.lastInjected = state.tracer.lastInjected;
+    }
+    this.pathlines.installState(owned ? state.pathlines : structuredClone(state.pathlines));
+    this.iteration = state.iteration;
+    this.simulatedTime = state.simulatedTime;
+    this.lastTimestep = state.lastTimestep;
+    this.lastSelection = state.lastSelection;
+    this.lastStep = state.lastStep;
+    this.lastTracer = state.lastTracer;
+    this.changeRate = state.changeRate;
+    this.lastStepInputs = state.lastStepInputs;
+    this.budgetCache = null;
+  }
+
+  // Replays what each remote step recorded - the residual and every probe's
+  // sample - so the charts here hold one point per step exactly as if the
+  // steps had run here. A probe added here since has no reading in them and
+  // simply starts with the next batch; one removed is skipped.
+  applyStepRecords(records) {
+    for (const record of records) {
+      this.residuals.record(record.iteration, record.step);
+      for (const [id, latest] of record.readings) {
+        const probe = this.probes.probeById(id);
+        if (probe !== null && latest !== null) probe.history.push(latest.time, latest.sample);
+      }
+    }
   }
 
   // The momentum budget of the last step, term by term - what moved the

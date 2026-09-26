@@ -49,21 +49,27 @@ export const PATHLINE_DEFAULTS = {
 // A small deterministic generator, so the same scenario seeds the same
 // particles twice. A picture that reshuffles on every reset cannot be compared
 // against itself, and a test cannot assert anything exact about one.
+// mulberry32, with its one word of state held on an object rather than in a
+// closure - so the generator can be handed to a worker and back (M14) and
+// continue the same sequence. The arithmetic is unchanged.
 function mulberry32(seed) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
+  const rng = { state: seed >>> 0 };
+  rng.next = () => {
+    rng.state = (rng.state + 0x6d2b79f5) >>> 0;
+    const a = rng.state;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+  return rng;
 }
 
 export class PathlineSet {
   constructor(grid, { count = PATHLINE_DEFAULTS.count, trail = PATHLINE_DEFAULTS.trail,
     seed = 0x5eed } = {}) {
     this.trail = trail;
-    this.random = mulberry32(seed);
+    this.rng = mulberry32(seed);
+    this.random = this.rng.next;
     this.particles = [];
     // A domain with no fluid at all - everything drawn over - gets no
     // particles rather than an infinite search for somewhere to put one.
@@ -100,6 +106,17 @@ export class PathlineSet {
   }
 
   get count() { return this.particles.length; }
+
+  // Everything needed to carry on exactly where this set is: the parcels and
+  // the generator's state. Plain data, so it survives a structured clone.
+  captureState() {
+    return { particles: this.particles, rng: this.rng.state };
+  }
+
+  installState({ particles, rng }) {
+    this.particles = particles;
+    this.rng.state = rng;
+  }
 
   // One step of every parcel, by the timestep the solver actually took.
   //
