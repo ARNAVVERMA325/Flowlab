@@ -307,6 +307,13 @@ when it is done or explicitly closed by the owner.
   step 2. **Status: reconciled, not fixed — awaiting the owner's decision.**
   Any fix changes numerics and would be its own unit.
 - **Convective outflow** (from M4). Unchanged.
+- **MIC(0)-preconditioned pressure solve: built, re-validated, not enabled**
+  (see `docs/pressure-preconditioner.md`). 4.9–6.3× fewer iterations; steps
+  1.5–2.6× faster in node and 1.51–1.64× in the browser. Every validation
+  claim and experiment verdict holds except one M6 test claim: refusal of an
+  unsolvable split-chamber source at a bound of 1, which plain CG met only by
+  diverging. **Status: awaiting the owner's decision** between the options in
+  that document.
 
 Refusals signed off by the owner: M8's density view (one uniform density, so it
 would carry no information) and M9's integrated drag and lift (the staircase
