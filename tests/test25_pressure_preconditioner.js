@@ -26,8 +26,8 @@ import { FIXTURE_CASES, measureFixtureCase } from "./support/boundaryFixtures.js
 
 const { scratchFor, micPreconditioner, applyMic } = __testing;
 
-// The preconditioned solve is not the default yet (see the doc), so every
-// session here asks for it by name.
+// Every session here asks for the preconditioned solve by name, so these
+// tests keep testing it whatever the default becomes.
 function pcg(session) {
   session.scenario.params = { ...session.scenario.params, pressureSolver: "mic-pcg" };
   return session;
@@ -62,14 +62,15 @@ function geometries() {
   return list;
 }
 
-test("the default is still plain CG, the solve is selectable, and an unknown one is refused", () => {
-  const plain = new SimulationSession("cavity");
-  plain.advance();
-  assert.equal(plain.lastStep.pressureSolver, "cg", "not enabled until the owner decides");
-  const session = pcg(new SimulationSession("cavity"));
+test("the default is the preconditioned solve, CG is selectable, and an unknown one is refused", () => {
+  const session = new SimulationSession("cavity");
   session.advance();
   assert.equal(session.lastStep.pressureSolver, "mic-pcg");
   assert.equal(session.lastStep.preconditionerFallback, false);
+  const reference = new SimulationSession("cavity");
+  reference.scenario.params = { ...reference.scenario.params, pressureSolver: "cg" };
+  reference.advance();
+  assert.equal(reference.lastStep.pressureSolver, "cg");
   const grid = new StaggeredGrid(4, 4, 0.25);
   const bc = { left: { type: "wall" }, right: { type: "wall" }, top: { type: "wall", u: 1 }, bottom: { type: "wall" } };
   assert.throws(() => step(grid, bc, { nu: 0.1, rho: 1, dt: 0.01, pressureSolver: "multigrid" }), /unknown pressure solver/);

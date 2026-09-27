@@ -1488,14 +1488,12 @@ export function step(grid, bc, params) {
     sources = null,
     divergenceTol = 1e-8,
     poissonMaxIterations = 5000,
-    // "cg" (the default): plain conjugate gradient, the solver every validated
-    // number in this project was produced with. "mic-pcg": conjugate gradient
-    // preconditioned with MIC(0), see solvePressurePCG - built, tested and
-    // re-validated claim by claim, and NOT the default: one existing claim
-    // (the M6 split-chamber source refused at a bound of 1) does not hold
-    // under it, and whether that claim stands is the owner's decision. See
-    // docs/pressure-preconditioner.md. Enabling it is this one line.
-    pressureSolver = "cg",
+    // "mic-pcg" (the default): conjugate gradient preconditioned with MIC(0),
+    // see solvePressurePCG and docs/pressure-preconditioner.md - re-validated
+    // claim by claim before it was enabled. "cg": plain conjugate gradient,
+    // the solver every earlier number was produced with, kept untouched as the
+    // reference; tests/fixtures/golden-fields.json still pins it byte for byte.
+    pressureSolver = "mic-pcg",
   } = params;
 
   const plan = boundaryPlanFor(grid, bc);

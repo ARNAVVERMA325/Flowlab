@@ -142,6 +142,13 @@ Found while doing it:
   test now stops with a batch in flight, asserts that exactly one was
   discarded, and pauses at the three points above. All mutants are killed.
 
+**Measured with plain CG.** Every step time in this document predates the
+preconditioned pressure solve, which was enabled afterwards as its own unit
+(`docs/pressure-preconditioner.md`). With it, the browser step times fall by
+1.51–1.64× (the cylinder from 75.9 to 50.4 ms). The worker's design and its
+byte-identity proofs are independent of which solve runs; all of them pass
+with it.
+
 ## 2. Adaptive display resolution
 
 The smooth renderer's budget of 120k buffer pixels was measured on one

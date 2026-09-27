@@ -4,7 +4,7 @@
 
 Every number below was measured by running the solver through the same harnesses the test suite uses (`validation/measure.js`), and compared against references declared in `validation/registry.js`. A hand-maintained validation record can drift from the code while still reading as authority, which is the one failure mode a document like this must not have.
 
-Generated 2026-09-21 18:12:50 UTC.
+Generated 2026-09-27 06:41:19 UTC.
 
 ## How to read this
 
@@ -101,7 +101,7 @@ The standard 2D incompressible benchmark and the go/no-go gate for this solver. 
 
 **Verification:** cross-referenced against an independent source
 
-> Cross-referenced against an independent public transcription, one source per table. The check found one wrong digit in the previous recalled transcription (Re=1000, x=0.9063: -0.51550 against a true -0.51500) which was setting the reported Re=1000 error. One published point is excluded as unreliable - see tests/support/ghia.js EXCLUDED_POINTS.
+> Cross-referenced against an independent public transcription, one source per table. The check found one wrong digit in the previous recalled transcription (Re=1000, x=0.9063: -0.51550 against a true -0.51500) which was setting the reported Re=1000 error. One published point is excluded as unreliable - see validation/ghia.js EXCLUDED_POINTS.
 
 | quantity | reference | measured | tolerance | result |
 |---|---|---|---|---|
@@ -136,8 +136,8 @@ Wake length compared against published values for an unbounded cylinder, which r
 | wake L/D at Re=20, 6% blockage | 0.93 | 1.03318<br><sub>published unbounded value 0.93</sub> | 15% relative | pass |
 | separation onset below Re~5 | 0 | 0<br><sub>0 = attached at Re=1, as expected</sub> | 0 | pass |
 | velocity on the body surface | 0 | 0 | 0 | pass |
-| flux deviation through all cuts (relative) | 0 | 2.527e-10 | 1.000e-7 | pass |
-| centreline asymmetry | 0 | 5.388e-11 | 1.000e-9 | pass |
+| flux deviation through all cuts (relative) | 0 | 6.356e-11 | 1.000e-7 | pass |
+| centreline asymmetry | 0 | 3.656e-10 | 1.000e-9 | pass |
 
 ## 90-degree channel bend
 
@@ -158,8 +158,8 @@ There is no published reference for this geometry, so the bend's own behaviour -
 | quantity | reference | measured | tolerance | result |
 |---|---|---|---|---|
 | inlet-leg dp/dx vs -12*mu*U/w^2 (relative) | 0 | 7.792e-3 | 0.02 | pass |
-| inlet-leg profile convergence order | 2 | 1.93237 | 0.3 | pass |
-| flux deviation through all cuts (relative) | 0 | 6.906e-9 | 1.000e-6 | pass |
+| inlet-leg profile convergence order | 2 | 1.93238 | 0.3 | pass |
+| flux deviation through all cuts (relative) | 0 | 4.197e-8 | 1.000e-6 | pass |
 | velocity on the duct walls | 0 | 0 | 0 | pass |
 | sharp bend separates at the inner corner | — | —<br><sub>bubble 2.768w, peak reverse 0.2214 U0</sub> | — | reported |
 | radiusing suppresses the separation | — | —<br><sub>smooth bend peak reverse 0.0011 U0 against 0.2214 sharp</sub> | — | reported |
@@ -185,7 +185,7 @@ The M4 pressure boundary condition checked against closed form. Nothing prescrib
 | U_mean vs dp*w^2/(12*mu*L) at 32 cells (relative) | 0 | 1.953e-3<br><sub>U_mean = 1.001953 against 1.000000</sub> | 0.01 | pass |
 | U_mean vs dp*w^2/(12*mu*L) at 16 cells (relative) | 0 | 7.813e-3 | 0.02 | pass |
 | convergence order of the flow-rate error | 2 | 2<br><sub>second order is what a correct boundary treatment gives</sub> | 0.2 | pass |
-| flux deviation inlet to outlet | 0 | 9.113e-11<br><sub>the flux is an output here, so its constancy is a real check</sub> | 1.000e-8 | pass |
+| flux deviation inlet to outlet | 0 | 4.079e-13<br><sub>the flux is an output here, so its constancy is a real check</sub> | 1.000e-8 | pass |
 | flow-rate inlet delivered vs requested (relative) | 0 | 0<br><sub>asked for 0.6, delivered 0.600000000000000</sub> | 1.000e-13 | pass |
 
 ## Drawn geometry and surface conditions
@@ -203,7 +203,7 @@ The M5 geometry pipeline, checked against exact invariants only. Two things are 
 | cells differing between document and original predicate (3 scenarios) | 0 | 0<br><sub>cylinder 113 solid cells on a 168x73 grid, plus both bends over 7056 cells each</sub> | 0 | pass |
 | surface flow rate delivered vs requested | 0 | 0<br><sub>asked for 0.15 through the block's upstream face, delivered 0.150000000000000</sub> | 1.000e-12 | pass |
 | velocity on drawn solid surfaces | 0 | 0<br><sub>the block's other faces, which carry plain no-slip</sub> | 0 | pass |
-| max\|div u\| with a surface inlet driving the flow | 0 | 9.399e-8<br><sub>after 300 steps</sub> | 1.000e-7 | pass |
+| max\|div u\| with a surface inlet driving the flow | 0 | 5.919e-8<br><sub>after 300 steps</sub> | 1.000e-7 | pass |
 
 ## Interior sources
 
@@ -217,8 +217,8 @@ The M6 source model, against exact invariants only. Three things are established
 
 | quantity | reference | measured | tolerance | result |
 |---|---|---|---|---|
-| mass source: flux delivered vs requested | 0 | 6.939e-18<br><sub>asked for 0.05, the outlet carried 0.050000000000</sub> | 1.000e-11 | pass |
-| continuity error with a source driving the flow | 0 | 8.570e-8<br><sub>max\|div u - q\|; the raw max\|div u\| is 1.800e+0, which is the divergence the source imposes on purpose</sub> | 1.000e-7 | pass |
+| mass source: flux delivered vs requested | 0 | 0<br><sub>asked for 0.05, the outlet carried 0.050000000000</sub> | 1.000e-11 | pass |
+| continuity error with a source driving the flow | 0 | 7.031e-8<br><sub>max\|div u - q\|; the raw max\|div u\| is 1.800e+0, which is the divergence the source imposes on purpose</sub> | 1.000e-7 | pass |
 | momentum source: overshoot past its target in one step | 0 | 0<br><sub>relaxation times from 1e-9 to 10 against a timestep of 4.167e-3</sub> | 0 | pass |
 | golden fields moved by compiling the source path in | 0 | 0<br><sub>13 cases, asserted byte-identical in tests/test13_m6_sources.js</sub> | 0 | pass |
 
@@ -266,7 +266,7 @@ The M8 curve families, against a field whose exact trajectories are known. Three
 | interpolation error on a linear field | 0 | 4.441e-16<br><sub>u = 3x + 1, v = -2y, sampled at 400 points off the cell centres</sub> | 1.000e-12 | pass |
 | streamline radius drift in solid-body rotation, 900 steps | 0 | 3.512e-4<br><sub>as a fraction of a radius of 0.5; forward Euler on the same field drifts 80.3%</sub> | 0.01 | pass |
 | pathline radius drift in the same field | 0 | 1.280e-8<br><sub>400 steps of dt = 2e-3 - the steady-flow case where a pathline is a streamline</sub> | 0.01 | pass |
-| streamline points outside the fluid, all scenarios | 0 | 0<br><sub>over 15475 traced points in 6 scenarios</sub> | 0 | pass |
+| streamline points outside the fluid, all scenarios | 0 | 0<br><sub>over 15386 traced points in 6 scenarios</sub> | 0 | pass |
 
 ## Flow analysis quantities
 

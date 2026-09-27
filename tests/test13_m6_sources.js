@@ -536,15 +536,23 @@ test("M6 - an unsolvable mass source is refused at every meaningful bound", () =
   //
   // The detector's threshold IS divergenceTol, so "meaningful" has a precise
   // meaning here: a bound tighter than the divergence the configuration forces
-  // (1.091e-1 per chamber). Below that it is refused, either by the solvability
-  // check or, once that passes, by the divergence bound behind it.
+  // (1.091e-1 per chamber). Every such bound is refused.
+  //
+  // This list used to include a bound of 1 - looser than the forced imbalance,
+  // so not meaningful by the definition above. Plain CG was refused there only
+  // because it DIVERGES on a system with no solution (residual 1.94e3 after
+  // 20,000 iterations), not by any check. The preconditioned solve converges
+  // within that loose bound instead. Changed by the owner's decision when the
+  // preconditioner was enabled (docs/pressure-preconditioner.md, option a):
+  // above the forced imbalance the requirement is that the run REPORTS the
+  // imbalance truthfully, which is asserted below.
   const { grid, params } = stillBox();
   const sources = [
     { kind: "mass", where: leftSpot, rate: 0.05 },
     { kind: "mass", where: rightSpot, rate: -0.05 },
   ];
   const seen = [];
-  for (const divergenceTol of [1e-7, 1e-2, 1]) {
+  for (const divergenceTol of [1e-7, 1e-2, 0.1]) {
     const fresh = new StaggeredGrid(grid.nx, grid.ny, grid.h);
     applyDocument(fresh, DIVIDER);
     let threw = null;
@@ -554,7 +562,21 @@ test("M6 - an unsolvable mass source is refused at every meaningful bound", () =
     assert.ok(threw, `divergenceTol ${divergenceTol} let an unsolvable source run`);
     seen.push(`${divergenceTol.toExponential(0)} -> ${threw.name}`);
   }
-  console.log(`[M6 step 3] split-chamber case refused at every meaningful bound: ${seen.join(", ")}`);
+
+  // Looser than the imbalance: the caller has accepted that much error, the
+  // step runs, and what it reports is what the field has - measured from the
+  // velocities, and at least the imbalance the configuration forces.
+  const loose = new StaggeredGrid(grid.nx, grid.ny, grid.h);
+  applyDocument(loose, DIVIDER);
+  const report = step(loose, BOX, { ...params, sources, divergenceTol: 1 });
+  const measured = computeContinuityError(loose, sourcePlanFor(loose, sources)).max;
+  assert.ok(Math.abs(report.continuityError - measured) <= 1e-9 * measured,
+    `reported ${report.continuityError}, measured ${measured}`);
+  assert.ok(measured >= 1.091e-1, `the imbalance must show in the report: ${measured}`);
+  console.log(
+    `[M6 step 3] split-chamber case refused at every meaningful bound: ${seen.join(", ")}; ` +
+    `at a bound of 1 it runs and reports continuity error ${measured.toExponential(2)}`
+  );
 });
 
 test("M6 - at an absurd bound the CONTINUITY ERROR is the only honest readout", () => {

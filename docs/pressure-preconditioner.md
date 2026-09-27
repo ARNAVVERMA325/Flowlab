@@ -4,11 +4,10 @@ A solver change handled as its own unit, as agreed: the approach proposed first,
 a baseline captured before touching anything, then the implementation, a full
 re-validation claim by claim, and a stop if any claim did not hold.
 
-**Status: built, tested, re-validated, and NOT enabled.** Every validation
-claim, experiment verdict and per-step bound holds under it except one M6 test
-claim (section 3), which needs the owner's decision. Until then `step()`
-defaults to plain CG exactly as before, and nothing in the app's numbers has
-changed. Enabling it is one line (`pressureSolver = "mic-pcg"` in `step()`).
+**Status: ENABLED** as `step()`'s default, by the owner's decision (option
+(a) in section 3). Before that it was built, tested and re-validated claim by
+claim, and held back because one M6 test claim did not hold under it.
+`pressureSolver: "cg"` remains available as the reference.
 
 ## 1. What changed, and what did not
 
@@ -86,6 +85,13 @@ been changed in the test.** The options are:
   fall. That would be new behaviour, not a restoration, since CG only met the
   claim by diverging.
 - **(c) Don't adopt the preconditioner.** It stays available by name.
+
+**Decided: (a).** The test's bounds are now 1e-7, 1e-2 and 0.1, all tighter
+than the forced imbalance. All three are refused by the solvability check
+(`SolverGeometryError`), not by a solver breaking down. At a bound of 1 the
+test now requires the step to run and to report its continuity error
+truthfully: 6.22e-1, equal to the value measured from the field, and above
+the forced 1.091e-1.
 
 ## 4. Measured gain
 
@@ -257,7 +263,8 @@ Reading the table:
 
 - **With the new solver as the default:** node 364/365 (the M6 case in
   section 3 is the only failure) and browser 44/44.
-- **As committed, with the default back to CG:** both suites green.
+- **Enabled, with the M6 test changed per decision (a):** both suites green
+  (section 7).
 - **`tests/test25_pressure_preconditioner.js`** (10 tests) covers:
   - the factor is finite, positive and symmetric in eight geometries (six
     scenarios, a sealed chamber, a drawn body);
