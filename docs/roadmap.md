@@ -282,8 +282,35 @@ Not scheduled. Do not start any of these while a NOW milestone is open.
   mid-run; the smooth renderer's **display** resolution adapts to its own frame time. Not
   built, on the measurements: WebGL rendering (drawing already fits the frame); a GPU
   solver or preconditioned pressure solve is the biggest remaining speed-up but changes
-  the arithmetic and the golden fields — **flagged for a decision**. Experiments still
-  step on the main thread (known gap).*
+  the arithmetic and the golden fields — **flagged for a decision**. Experiments now run
+  in the worker too, with the same byte-identity proof.*
+
+---
+
+# OPEN — Carried items
+
+Deferred items that outlive a milestone are listed HERE, not only in each
+milestone's own document. The boundary-inflow item below was carried in the
+deferred lists of M6–M9 and then fell off five milestones' lists unresolved,
+which is what this section exists to prevent. An item leaves this list only
+when it is done or explicitly closed by the owner.
+
+- **Boundary-inflow timestep coupling** (from M6). A scenario that starts from
+  rest with a boundary inlet takes its first step outside the convective limit:
+  the timestep is chosen from a field that is still at rest, and the inlet's
+  speed is not in it. Measured with the solver's own CFL, (|u|+|v|)·dt/h at cell
+  centres after step 1: **bend-sharp 5.145, bend-smooth 3.717, jet 1.798**. The
+  cylinder, which starts from a uniform field, is 0.993. These numbers are
+  identical at the M6 commit and today; a figure of 3.37 once quoted for the
+  sharp bend used the largest single face component, which understates the
+  CFL wherever the flow turns diagonally. The timestep corrects itself from
+  step 2. **Status: reconciled, not fixed — awaiting the owner's decision.**
+  Any fix changes numerics and would be its own unit.
+- **Convective outflow** (from M4). Unchanged.
+
+Refusals signed off by the owner: M8's density view (one uniform density, so it
+would carry no information) and M9's integrated drag and lift (the staircase
+perimeter does not converge to the true one at any resolution).
 
 ---
 

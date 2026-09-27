@@ -13,10 +13,14 @@
 //
 // The protocol is lockstep - one batch in flight at a time:
 //
-//   sync   { epoch, project, state, probeIds, nextProbeId, brush }
+//   sync   { epoch, project, state, probeIds, nextProbeId, brush, experiment }
 //          Rebuilds the worker's session from the app's: the setup as a saved
 //          project (io/project.js), the moving state as captureState(). Sent
 //          at every Run, and after anything that resets the field.
+//          `experiment` (an id, or null) runs an M10 experiment HERE: the
+//          runner decides after every single step, as it does on the main
+//          thread, and a batch ends on the step where a run ends. The app has
+//          already set up run 1, so the runner starts on the synced session.
 //
 //   batch  { epoch, calls, tracer, budgetMs, maxSteps }
 //          Applies the mid-run edits made in the app since the last batch, in
@@ -28,6 +32,8 @@
 // away rather than painted over the new flow.
 
 import { SimulationSession } from "./session.js";
+import { experimentById } from "../experiments/definitions.js";
+import { ExperimentRunner } from "../experiments/runner.js";
 
 // The session calls the app may make while a run continues. Everything else
 // either resets the field - and is followed by a fresh sync - or does not
@@ -46,8 +52,12 @@ export const FORWARDED = [
 export class StepperCore {
   // `posted`: replies leave through postMessage, which copies them, so the
   // state need not be copied first. In-process callers get independent copies.
-  constructor({ now = () => performance.now(), posted = false } = {}) {
+  constructor({ now = () => performance.now(), posted = false, experiments = experimentById } = {}) {
     this.posted = posted;
+    this.experiments = experiments;
+    this.runner = null;
+    // The runner as it stood at each of the last few replies - see #sync.
+    this.checkpoints = [];
     this.session = null;
     this.epoch = null;
     this.now = now;
@@ -59,7 +69,7 @@ export class StepperCore {
     throw new Error(`unknown message type "${message.type}"`);
   }
 
-  #sync({ epoch, project, state, probeIds, nextProbeId, brush }) {
+  #sync({ epoch, project, state, probeIds, nextProbeId, brush, experiment = null, resume = false }) {
     const session = new SimulationSession(project.scenario);
     session.importProject(project);
     session.probes.adoptNumbering(probeIds, nextProbeId);
@@ -67,6 +77,32 @@ export class StepperCore {
     session.installState(state);
     this.session = session;
     this.epoch = epoch;
+    const previous = this.runner;
+    this.runner = null;
+    // A paused experiment resumes with the runner that was stepping it - its
+    // averaging samples live here - pointed at the resynced session, and
+    // rolled back to the batch whose state the app actually kept. A pause
+    // discards the batch in flight, but the runner had already counted it:
+    // its samples, perhaps even the end of a run.
+    const checkpoint = resume ? this.checkpoints.find((c) => c.iteration === state.iteration && c.scenario === project.scenario) : null;
+    if (experiment !== null && checkpoint && previous?.experiment.id === experiment) {
+      previous.session = session;
+      previous.state = "running";
+      previous.runIndex = checkpoint.runIndex;
+      previous.samples = checkpoint.samples;
+      previous.samples.length = checkpoint.sampleCount;
+      previous.results.length = checkpoint.resultCount;
+      previous.conclusion = null;
+      this.runner = previous;
+    } else if (experiment !== null && resume) {
+      throw new Error("the paused experiment cannot be resumed: no record of the state it stopped at");
+    } else if (experiment !== null) {
+      const definition = this.experiments(experiment);
+      if (definition === null) throw new Error(`unknown experiment "${experiment}"`);
+      // Later runs are set up here exactly as the runner sets them up anywhere:
+      // load the scenario, then the Reynolds number.
+      this.runner = new ExperimentRunner(definition, session).start({ setUpFirst: false });
+    }
     return { type: "synced", epoch };
   }
 
@@ -83,22 +119,46 @@ export class StepperCore {
       session.tracer.c.set(tracer.c);
       session.tracer.steps = tracer.steps;
     }
-    session.stepLog = [];
+    // Held here as well as on the session: a run ending mid-batch loads the
+    // next scenario, and that reset clears the session's reference.
+    const log = [];
+    session.stepLog = log;
     const started = this.now();
     let steps = 0;
     let error = null;
+    const runner = this.runner;
+    const runBefore = runner?.runIndex ?? null;
     try {
       do {
         session.advance();
         steps++;
+        // The runner decides after every step. A batch ends on the step a run
+        // ends: the next run is a different scenario, and the app must set it
+        // up before it can take that run's state.
+        if (runner !== null && runner.state === "running" && runner.afterStep() !== "continue") break;
       } while (steps < maxSteps && this.now() - started < budgetMs);
     } catch (thrown) {
       // Sent as data and rebuilt as the same class on the other side, so the
       // app classifies it exactly as it would a failure on its own thread.
       error = { name: thrown.name, message: thrown.message, details: thrown.details ?? null };
+      if (runner?.state === "running") runner.fail(thrown.message);
     }
-    const records = session.stepLog;
+    // Steps from a run that has just ended describe a flow the app is about
+    // to replace with the next run's; their chart points die with it, exactly
+    // as they would on the main thread.
+    const records = runner !== null && runner.runIndex !== runBefore ? [] : log;
     session.stepLog = null;
+    if (runner !== null) {
+      this.checkpoints.push({
+        iteration: session.iteration,
+        scenario: session.scenarioId,
+        runIndex: runner.runIndex,
+        samples: runner.samples,
+        sampleCount: runner.samples.length,
+        resultCount: runner.results.length,
+      });
+      if (this.checkpoints.length > 4) this.checkpoints.shift();
+    }
     return {
       type: "batch",
       epoch,
@@ -108,6 +168,7 @@ export class StepperCore {
       // By reference where it can be: posting the reply clones it anyway.
       state: session.captureState({ copy: !this.posted }),
       error,
+      experiment: runner === null ? null : (this.posted ? runner.snapshot() : structuredClone(runner.snapshot())),
     };
   }
 }

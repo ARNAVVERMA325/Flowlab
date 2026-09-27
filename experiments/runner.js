@@ -13,9 +13,13 @@ export class ExperimentRunner {
     this.session = session;
     // How a run is set up. The harness supplies its own so the display is
     // rebuilt with the scenario; the default is enough for a headless run.
+    // Through this.session, not the constructor's argument: a runner resumed
+    // in the solver worker is re-pointed at a freshly synced session, and a
+    // closure over the old one set the next run up on a session nobody was
+    // stepping (found by the pause-and-resume test).
     this.onRunStart = onRunStart ?? ((run) => {
-      session.load(run.scenario);
-      if (run.Re !== undefined) session.setReynolds(run.Re);
+      this.session.load(run.scenario);
+      if (run.Re !== undefined) this.session.setReynolds(run.Re);
     });
     this.state = "idle";   // idle | running | finished | stopped | failed
     this.runIndex = -1;
@@ -23,19 +27,52 @@ export class ExperimentRunner {
     this.conclusion = null;
     this.failure = null;
     this.samples = [];
+    // Set when this runner is a MIRROR of one running in the solver worker
+    // (see snapshot/adopt): the samples live there, and only their count is
+    // needed here for the progress line.
+    this.mirroredSamples = null;
   }
 
   get run() {
     return this.experiment.runs[this.runIndex] ?? null;
   }
 
-  start() {
+  // `setUpFirst: false` starts on a session the caller has already set up for
+  // run 1 - the solver worker, whose session arrives synced from the app's.
+  start({ setUpFirst = true } = {}) {
     this.state = "running";
     this.results = [];
     this.conclusion = null;
     this.failure = null;
-    this.#begin(0);
+    if (setUpFirst) this.#begin(0);
+    else {
+      this.runIndex = 0;
+      this.samples = [];
+    }
     return this;
+  }
+
+  // Everything the app's panel shows, as plain data - so a runner stepping in
+  // the solver worker can be mirrored by one here. The results, conclusion
+  // and failure are the worker's own, not recomputed.
+  snapshot() {
+    return {
+      state: this.state,
+      runIndex: this.runIndex,
+      results: this.results,
+      conclusion: this.conclusion,
+      failure: this.failure,
+      sampleCount: this.samples.length,
+    };
+  }
+
+  adopt(snapshot) {
+    this.state = snapshot.state;
+    this.runIndex = snapshot.runIndex;
+    this.results = snapshot.results;
+    this.conclusion = snapshot.conclusion;
+    this.failure = snapshot.failure;
+    this.mirroredSamples = snapshot.sampleCount;
   }
 
   #begin(index) {
@@ -123,7 +160,7 @@ export class ExperimentRunner {
       changeRate: this.session.changeRate / scale,
       target: run.stop.steady ?? null,
       sampling: run.stop.average !== undefined && time >= run.stop.average.from,
-      samples: this.samples.length,
+      samples: this.mirroredSamples ?? this.samples.length,
     };
   }
 

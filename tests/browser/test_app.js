@@ -114,6 +114,12 @@ describe("browser", { skip }, () => {
         return null;
       });
       assert.notEqual(injected, null);
+      // Long enough for many solver batches to land. With the solver in a
+      // worker, a failure that did not also stop the worker was overwritten by
+      // its next batch - and read immediately, this check passed on timing.
+      await page.waitForTimeout(500);
+      assert.equal(await page.evaluate(() => window.__flowlab.stepper?.active ?? false), false,
+        "a failed run stops the solver worker too");
 
       const { panel } = await readState(page);
       assert.equal(panel.status, "FAILED");
@@ -1787,5 +1793,65 @@ describe("browser", { skip }, () => {
       await runForSteps(page, 5);
       assert.match(await page.textContent("#perf"), /-|render [\d.]+ ms at \d+ px\/cell/);
     });
+  });
+
+  test("experiments run in the worker: the same results, and the page keeps drawing", async () => {
+    // The pipe experiment, through the worker, against the same experiment
+    // run directly on the page.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#experiment", "pipe");
+      await page.click("#expstart");
+      await page.waitForFunction(() => window.__flowlab.experiment?.state !== "running", null, { timeout: 120000 });
+      assert.equal(await page.textContent("#computewhere"), "CPU, Web Worker");
+      const same = await page.evaluate(async () => {
+        const { SimulationSession } = await import("/ui/session.js");
+        const { ExperimentRunner } = await import("/experiments/runner.js");
+        const { experimentById } = await import("/experiments/definitions.js");
+        const runner = new ExperimentRunner(experimentById("pipe"), new SimulationSession("cavity")).start();
+        while (runner.state === "running") { runner.session.advance(); runner.afterStep(); }
+        const shown = window.__flowlab.experiment;
+        return JSON.stringify(runner.results) === JSON.stringify(shown.results) &&
+          JSON.stringify(runner.conclusion) === JSON.stringify(shown.conclusion);
+      });
+      assert.ok(same, "the worker's results are the direct run's, exactly");
+    });
+
+    // Frame gaps during the first seconds of the cylinder experiment, worker
+    // against this thread. The M14 gap: this was main-thread-only before.
+    const gapsDuring = async (query) => {
+      const app = await openApp(browser, server.url + query);
+      const { page } = app;
+      try {
+        await page.selectOption("#experiment", "cylinder");
+        await page.click("#expstart");
+        await page.waitForFunction(() => window.__flowlab.session.iteration >= 3, null, { timeout: 60000 });
+        await page.evaluate(() => {
+          window.__gaps = [];
+          let last = performance.now();
+          const loop = () => {
+            const now = performance.now();
+            window.__gaps.push(now - last);
+            last = now;
+            if (window.__gaps.length < 400 && !window.__stopGaps) requestAnimationFrame(loop);
+          };
+          requestAnimationFrame(loop);
+        });
+        await page.waitForTimeout(3000);
+        const p95 = await page.evaluate(() => {
+          window.__stopGaps = true;
+          const gaps = window.__gaps.slice(3).sort((a, b) => a - b);
+          return gaps[Math.floor(gaps.length * 0.95)];
+        });
+        await page.click("#expstop");
+        app.assertNoErrors(query || "worker");
+        return p95;
+      } finally {
+        await page.close();
+      }
+    };
+    const worker = await gapsDuring("");
+    const main = await gapsDuring("?compute=main");
+    console.log(`[M14] p95 frame gap during the cylinder experiment: ${worker.toFixed(0)} ms worker, ${main.toFixed(0)} ms main thread`);
+    assert.ok(worker < main / 2, `p95 frame gap during an experiment: ${worker.toFixed(0)} ms worker, ${main.toFixed(0)} ms main thread`);
   });
 });

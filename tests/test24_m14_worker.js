@@ -19,6 +19,8 @@ import { fluidById } from "../materials/fluids.js";
 import { TOOLS } from "../geometry/editor.js";
 import { SolverStabilityError } from "../solver/stability.js";
 import { projectFrom } from "../io/project.js";
+import { ExperimentRunner } from "../experiments/runner.js";
+import { experimentById } from "../experiments/definitions.js";
 
 function sameBytes(a, b) {
   if (a.length !== b.length) return false;
@@ -36,8 +38,8 @@ function assertSameFlow(a, b, what) {
 
 // A Worker stand-in: the real core, replies cloned and delivered on a later
 // macrotask, as postMessage does.
-function fakeWorker() {
-  const core = new StepperCore();
+function fakeWorker(options = {}) {
+  const core = new StepperCore(options);
   const worker = {
     onmessage: null,
     posted: [],
@@ -318,4 +320,138 @@ test("the render budget halves when frames run long and recovers, within fixed b
   assert.equal(subsampleFor(64, 64, 14), 5);
   assert.equal(subsampleFor(64, 64, 14, MIN_PIXEL_BUDGET), 2, "the floor keeps two pixels a cell");
   assert.equal(subsampleFor(64, 64, 14, PIXEL_BUDGET), subsampleFor(64, 64, 14), "the default is the old fixed budget");
+});
+
+// ---------------------------------------------------------------------------
+// Experiments in the worker
+// ---------------------------------------------------------------------------
+
+// Two short runs of different kinds, so a run change happens mid-protocol:
+// a steady run that hits its cap, then an averaged one at another Re.
+const SHORT = {
+  id: "short",
+  title: "short",
+  runs: [
+    {
+      label: "capped", scenario: "cavity", Re: 100, stop: { steady: 1e-12, maxTime: 0.25 },
+      measure: (session) => ({ sumU: session.grid.u.reduce((a, b) => a + b, 0), t: session.simulatedTime }),
+    },
+    {
+      label: "averaged", scenario: "cavity", Re: 400, stop: { average: { from: 0.1, to: 0.3, every: 2 } },
+      sample: (session) => ({ peak: Math.max(...session.grid.u), t: session.simulatedTime }),
+    },
+  ],
+  conclude: (results) => ({ rows: [], summary: `${results.length} runs` }),
+};
+const lookup = (id) => (id === "short" ? SHORT : experimentById(id));
+
+function directly(experiment) {
+  const runner = new ExperimentRunner(experiment, new SimulationSession("cavity")).start();
+  while (runner.state === "running") {
+    runner.session.advance();
+    runner.afterStep();
+  }
+  return runner;
+}
+
+// Runs `experiment` through the worker protocol the way the harness does:
+// run 1 set up here, the worker's runner mirrored by one here, and each later
+// run set up here when the worker reports it. `pauseAfter` batches in, the
+// stepper is stopped - discarding the batch in flight - and resumed.
+async function throughWorker(experiment, { pauseAfter = null, maxSteps = 5 } = {}) {
+  const app = new SimulationSession("jet");
+  let done;
+  const finished = new Promise((resolve) => { done = resolve; });
+  let batches = 0;
+  let paused = false;
+  let resume = null;
+  const mirror = new ExperimentRunner(experiment, app, {
+    onRunStart: (run) => {
+      app.load(run.scenario);
+      if (run.Re !== undefined) app.setReynolds(run.Re);
+    },
+  });
+  const stepper = new RemoteStepper({
+    createWorker: () => fakeWorker({ experiments: lookup }),
+    maxSteps,
+    budgetMs: Infinity,
+    // Through the forwarding proxy, as the harness does: these calls would
+    // invalidate the stepper if it were not mirroring.
+    onExperiment: (snapshot) => {
+      if (snapshot.runIndex !== mirror.runIndex) {
+        const run = experiment.runs[snapshot.runIndex];
+        view.load(run.scenario);
+        if (run.Re !== undefined) view.setReynolds(run.Re);
+      }
+      mirror.adopt(snapshot);
+    },
+    onBatch: () => {
+      batches++;
+      if (mirror.state !== "running") done();
+      else if (batches === pauseAfter && !paused) {
+        paused = true;
+        // After this handler returns the next batch is dispatched; stopping
+        // on a microtask stops with that batch IN FLIGHT, so it is computed -
+        // and counted by the worker's runner - and then discarded here. That
+        // is the case the runner's checkpoints exist for.
+        queueMicrotask(() => {
+          assert.equal(stepper.inFlight, true, "the pause must discard a batch in flight");
+          stepper.stop();
+        });
+        // Resumed on a later task, after the in-flight batch has been
+        // computed and thrown away.
+        resume = new Promise((resolve) => setTimeout(() => {
+          stepper.start(view, { experiment: experiment.id, resume: true });
+          resolve();
+        }, 30));
+      }
+    },
+    onFault: (message) => { throw new Error(message); },
+  });
+  const view = forwardingSession(app, stepper);
+  mirror.session = view;
+  stepper.discarded = 0;
+  mirror.start();
+  stepper.start(view, { experiment: experiment.id });
+  await finished;
+  await resume;
+  return { mirror, app, batches, discarded: stepper.discarded };
+}
+
+test("an experiment run in the worker gives the results of one run directly, to the byte", async () => {
+  const direct = directly(SHORT);
+  const { mirror, app } = await throughWorker(SHORT);
+  assert.equal(mirror.state, "finished");
+  assert.deepEqual(mirror.results, direct.results, "same measurements, same averages, same step counts");
+  assert.equal(mirror.results[0].steady, false, "the capped run is still recorded NOT steady");
+  assert.ok(mirror.results[1].sampleCount > 3);
+  assert.equal(app.scenario.Re, 400, "the app followed the worker to the second run");
+  assertSameFlow(app, direct.session, "final field of the last run");
+  // The chart holds the last run's steps and nothing from the run before it.
+  assert.ok(sameBytes(app.residuals.series("continuity").value, direct.session.residuals.series("continuity").value));
+  assert.ok(sameBytes(app.residuals.series("continuity").time, direct.session.residuals.series("continuity").time));
+});
+
+test("the real pipe experiment gives the same verdicts through the worker", async () => {
+  const pipe = experimentById("pipe");
+  const direct = directly(pipe);
+  const { mirror } = await throughWorker(pipe, { maxSteps: 400 });
+  assert.deepEqual(mirror.results, direct.results);
+  assert.deepEqual(mirror.conclusion, direct.conclusion);
+  assert.deepEqual(mirror.conclusion.rows.map((row) => row.status), ["agrees", "agrees", "agrees"]);
+});
+
+test("pausing mid-experiment and resuming counts every step once", async () => {
+  const direct = directly(SHORT);
+  // In batches of two steps the capped run is 52 batches (103 steps) and the
+  // averaged run samples from its step 12. So: paused mid-run (3), with the
+  // discarded batch crossing the end of run 1 (51 - the worker's runner has
+  // already moved to run 2), and with it holding an averaging sample (60).
+  for (const pauseAfter of [3, 51, 60]) {
+    const { mirror, app, discarded } = await throughWorker(SHORT, { pauseAfter, maxSteps: 2 });
+    assert.equal(discarded, 1, `paused after ${pauseAfter}: one batch was thrown away`);
+    assert.equal(mirror.state, "finished", `paused after ${pauseAfter}`);
+    assert.deepEqual(mirror.results, direct.results, `paused after ${pauseAfter}: results`);
+    assertSameFlow(app, direct.session, `paused after ${pauseAfter}: field`);
+  }
 });

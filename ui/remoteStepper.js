@@ -20,7 +20,15 @@ import { FORWARDED } from "./stepperCore.js";
 export class RemoteStepper {
   // `maxSteps` caps a batch by count as well as by time - for tests, which
   // need batch boundaries they can reproduce.
-  constructor({ createWorker, onBatch, onFault, budgetMs = 16, maxSteps = Infinity }) {
+  // `onExperiment(snapshot)` is called for a batch that ran an experiment,
+  // BEFORE its state is installed: when the worker has moved on to the next
+  // run, the app must set that run's scenario up first, or the state would not
+  // fit. What the app does to mirror it is not a reset of the worker's flow,
+  // so invalidation is suspended meanwhile.
+  constructor({ createWorker, onBatch, onFault, onExperiment = () => {}, budgetMs = 16, maxSteps = Infinity }) {
+    this.onExperiment = onExperiment;
+    this.mirroring = false;
+    this.experiment = null;
     this.maxSteps = maxSteps;
     this.createWorker = createWorker;
     this.onBatch = onBatch;
@@ -56,9 +64,14 @@ export class RemoteStepper {
 
   // Starts (or restarts) stepping `session` in the worker, from its current
   // state. Every earlier reply becomes stale.
-  start(session) {
+  // `experiment`: an experiment id to run in the worker, with its first run
+  // already set up in `session`. `budgetMs` overrides the batch length - an
+  // experiment wants throughput more than a picture every 16 ms.
+  start(session, { experiment = null, resume = false, budgetMs = null } = {}) {
     this.#ensureWorker();
     this.session = session;
+    this.experiment = experiment;
+    this.batchBudget = budgetMs ?? this.budgetMs;
     this.epoch++;
     this.active = true;
     this.calls = [];
@@ -71,6 +84,8 @@ export class RemoteStepper {
       probeIds: session.probes.probes.map((probe) => probe.id),
       nextProbeId: session.probes.nextId,
       brush: session.brushSource,
+      experiment,
+      resume,
     });
     this.#dispatch();
   }
@@ -86,6 +101,7 @@ export class RemoteStepper {
   // Something reset the field here. Whatever the worker is doing describes a
   // flow that no longer exists.
   invalidate() {
+    if (this.mirroring) return;
     this.stop();
   }
 
@@ -116,7 +132,7 @@ export class RemoteStepper {
       epoch: this.epoch,
       calls: this.calls.splice(0),
       tracer,
-      budgetMs: this.budgetMs,
+      budgetMs: this.batchBudget ?? this.budgetMs,
       maxSteps: this.maxSteps,
     });
   }
@@ -137,13 +153,24 @@ export class RemoteStepper {
     this.stepsReceived += reply.steps;
     this.workerBusy += reply.elapsed;
     this.roundTrip += performance.now() - this.sentAt;
+    if (reply.experiment !== null && reply.experiment !== undefined) {
+      this.mirroring = true;
+      try {
+        this.onExperiment(reply.experiment);
+      } finally {
+        this.mirroring = false;
+      }
+      // The app may have stopped the experiment in response.
+      if (!this.active) return;
+    }
     // Dye edited here since this batch was sent: keep the edit.
     const keepDye = this.tracerDirty;
     // The reply arrived through postMessage, so it is already this thread's own.
     this.session.installState(reply.state, { tracer: !keepDye, owned: true });
     this.session.applyStepRecords(reply.records);
     this.onBatch(reply);
-    if (reply.error !== null) {
+    // A failure, or an experiment that has finished: nothing more to step.
+    if (reply.error !== null || (reply.experiment && reply.experiment.state !== "running")) {
       this.active = false;
       return;
     }

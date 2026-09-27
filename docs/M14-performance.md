@@ -97,11 +97,50 @@ the copy. The first worker version also repainted 60 times a second whether or
 not anything new had arrived. It now redraws only when a batch lands; every
 interaction draws for itself.
 
-**Known gap: experiments still step on the main thread.** The M10 runner
-decides after every single step, and a batch would end a run on the wrong
-step. A cylinder experiment therefore still draws at about 10 fps, as before
-M14. The fix is to run the runner inside the worker and mirror its state. That
-is designed but not built.
+**Experiments run in the worker too** (added after M14, as its own unit). The
+M10 runner decides after every single step, so it moved into the worker beside
+the solver rather than being batched around. A batch ends on the step where a
+run ends. The app keeps its runner as a **mirror**: it adopts the worker's
+results, conclusion and progress, and never computes its own. When the worker
+moves to the next run, the app sets that run up first, with the same load and
+Reynolds number, and only then installs the run's state. What the app does
+while mirroring is not a reset of the worker's flow, so invalidation is
+suspended during it.
+
+- **Proved the same way as the rest.** In node, through the real protocol, a
+  two-run experiment (one capped steady run, then one averaged run at another
+  Re) and the real pipe experiment give results, conclusions, final fields and
+  residual histories **identical** to running them directly. In the browser, the
+  pipe experiment's results equal the same experiment run on the page. The
+  three-run cavity sweep ran through the UI in 172 s (247 s on the main thread
+  before) with results identical to a headless run.
+- **Pause and resume.** A pause discards the batch in flight, but the worker's
+  runner had already counted it: its averaging samples, or even the end of a
+  run. The worker keeps a checkpoint of its runner at each reply. On resume, it
+  rolls back to the checkpoint whose step matches the state the app kept. The
+  test pauses mid-run, with the discarded batch crossing a run boundary, and
+  with it holding an averaging sample. Every case finishes with results
+  identical to an uninterrupted run.
+- **Responsiveness during the cylinder experiment:** p95 frame gap **31 ms** in
+  the worker against **184–197 ms** on the main thread.
+
+Found while doing it:
+
+- **The runner's default setup closed over the session it was constructed
+  with.** A runner resumed on a freshly synced session therefore set the next
+  run up on a session nobody was stepping. The second run ran at the first
+  run's Re, and the pause-and-resume test caught it. It now uses `this.session`.
+- **A failure did not stop the worker.** When the app halts on a non-finite
+  field it now stops the stepper too. Otherwise the next batch installed a
+  healthy-looking field over the failure. The NaN browser check had passed at
+  M14 on timing; it failed one run in three on this pass. The check now waits
+  long enough for batches to land and asserts the stepper stopped. It fails
+  3/3 without the fix and passes 3/3 with it.
+- **Mutation testing found the first pause test didn't pause anything.**
+  Stopping inside the batch handler stops before the next batch is dispatched,
+  so nothing was ever discarded, and the three checkpoint mutants survived. The
+  test now stops with a batch in flight, asserts that exactly one was
+  discarded, and pauses at the three points above. All mutants are killed.
 
 ## 2. Adaptive display resolution
 
@@ -142,6 +181,9 @@ one, and it would move every validated number.
   - stale epochs and unforwarded calls;
   - the full asynchronous protocol with edits and dye mid-flight;
   - a brush already held when Run is pressed;
+  - experiments through the worker (a two-run experiment and the real pipe
+    experiment) against running them directly, and pause/resume at three
+    points;
   - a reset discarding an in-flight batch;
   - a worker failure coming back as the same error;
   - the proxy's forwarding and invalidation;

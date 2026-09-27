@@ -159,6 +159,10 @@ const FRAME_BUDGET_MS = 24;
 // more steps and more time - the picture still updates several times a second.
 const EXPERIMENT_STEPS_PER_FRAME = 40;
 const EXPERIMENT_FRAME_BUDGET_MS = 90;
+// In the worker an experiment is stepped in batches of this length: longer
+// than the 16 ms of ordinary running, because an experiment wants throughput
+// and the page keeps drawing either way.
+const EXPERIMENT_BATCH_MS = 50;
 
 // Width of the boundary-condition bands, and the margin they live in. The
 // bands sit BESIDE the field, not over its edge: the outermost cells carry the
@@ -212,8 +216,8 @@ export class Harness {
     // M14: where the solver runs. In a Web Worker wherever module workers are
     // available, so the page keeps drawing and answering input however slow a
     // step is; on this thread otherwise, or when ?compute=main asks for it.
-    // Experiments always step here - the runner decides after every single
-    // step, and batching them would end a run on the wrong one.
+    // Experiments run in the worker too, with the runner beside the solver so
+    // it still decides after every single step (stepperCore.js).
     const forced = new URLSearchParams(globalThis.location?.search ?? "").get("compute");
     this.compute = forced === "main" || typeof Worker === "undefined" ? "main" : "worker";
     this.computeNote = forced === "main" ? "main thread (requested)" : null;
@@ -221,6 +225,7 @@ export class Harness {
       createWorker: () => new Worker(new URL("./solverWorker.js", import.meta.url), { type: "module" }),
       onBatch: (reply) => this.onWorkerBatch(reply),
       onFault: (message) => this.onWorkerFault(message),
+      onExperiment: (snapshot) => this.onWorkerExperiment(snapshot),
     });
     this.workerSteps = 0;
     // Probe display state. The probes themselves live in the session, which is
@@ -909,8 +914,18 @@ export class Harness {
     // In worker mode the solver is elsewhere: this frame only draws whatever
     // state last arrived. The stepper is (re)started whenever it is idle - at
     // Run, and after anything that reset the field, which made it stale.
-    if (this.stepper !== null && this.compute === "worker" && this.experiment?.state !== "running") {
-      if (!this.stepper.active) this.stepper.start(this.session);
+    if (this.stepper !== null && this.compute === "worker") {
+      if (!this.stepper.active) {
+        const runner = this.experiment?.state === "running" ? this.experiment : null;
+        this.stepper.start(this.session, runner === null ? {} : {
+          experiment: runner.experiment.id,
+          // A fresh start begins the worker's runner on run 1; anything else
+          // is a resume after a pause, and keeps the runner it had.
+          resume: !this.experimentFresh,
+          budgetMs: EXPERIMENT_BATCH_MS,
+        });
+        this.experimentFresh = false;
+      }
       const steps = this.workerSteps;
       this.workerSteps = 0;
       // Repainted only when a batch has landed. Redrawing an unchanged state
@@ -986,6 +1001,9 @@ export class Harness {
   // into the error it was, so it is classified exactly as one thrown here.
   onWorkerBatch(reply) {
     this.workerSteps += reply.steps;
+    // A batch that ended the run (an experiment finishing) arrives after the
+    // frame loop has stopped; it is the final picture, so draw it now.
+    if (reply.error === null && this.state !== "running") this.draw();
     if (reply.error === null) return;
     const kind = Object.values(RUN_FAILURE_KINDS).find((type) => type.name === reply.error.name);
     const error = kind ? Object.create(kind.prototype) : new Error();
@@ -993,6 +1011,29 @@ export class Harness {
     error.message = reply.error.message;
     if (reply.error.details !== null) error.details = reply.error.details;
     this.handleRunError(error);
+  }
+
+  // The worker's experiment runner reported in. This runner is its mirror: it
+  // adopts the worker's results rather than computing its own. When the worker
+  // has moved to the next run, that run is set up here first - the same load
+  // and Reynolds number - so the state that comes with it fits.
+  onWorkerExperiment(snapshot) {
+    const runner = this.experiment;
+    if (runner === null || runner.state !== "running") {
+      this.stepper.stop();
+      return;
+    }
+    if (snapshot.runIndex !== runner.runIndex) {
+      this.beginExperimentRun(runner.experiment.runs[snapshot.runIndex]);
+      // load() inside that cancelled the frame loop, which on the main
+      // thread is restarted by the tick it happens in. Here it is not.
+      if (this.state === "running" && this.frame === null) {
+        this.frame = requestAnimationFrame(() => this.tick());
+      }
+    }
+    runner.adopt(snapshot);
+    if (snapshot.state === "finished") this.onExperimentOutcome("finished");
+    else this.updateExperimentPanel();
   }
 
   // The worker could not reproduce the app's state - which should not happen,
@@ -1041,6 +1082,10 @@ export class Harness {
     // A field that has stopped being finite is a hard stop, not a warning.
     if (health.halt && this.state !== "failed") {
       this.state = "failed";
+      // The worker too, or its next batch would install a healthy-looking
+      // field over the one this failure is about (M14; found by the NaN
+      // check failing one run in three - it had passed on timing).
+      this.stepper?.stop();
       this.stopLoop();
       this.failure = health.message;
       this.failureKind = "field";
@@ -1160,13 +1205,7 @@ export class Harness {
     chip.dataset.state = this.state;
     chip.textContent = this.state;
     const perf = this.perf;
-    const experimenting = this.experiment?.state === "running";
-    set(
-      "#computewhere",
-      this.computeNote ?? (this.compute === "worker"
-        ? (experimenting ? "CPU, main thread (experiment)" : "CPU, Web Worker")
-        : "CPU, main thread"),
-    );
+    set("#computewhere", this.computeNote ?? (this.compute === "worker" ? "CPU, Web Worker" : "CPU, main thread"));
     set(
       "#perf",
       this.state === "running" && perf.fps !== null
@@ -1539,6 +1578,7 @@ export class Harness {
     this.experiment = new ExperimentRunner(experiment, this.session, {
       onRunStart: (run) => this.beginExperimentRun(run),
     });
+    this.experimentFresh = true;
     this.experiment.start();
     this.state = "running";
     this.updateExperimentPanel();
@@ -1588,6 +1628,8 @@ export class Harness {
     if (this.loadingForExperiment) return;
     if (this.experiment?.state !== "running") return;
     this.experiment.stop();
+    // The worker's runner must stop too; the next frame restarts plain stepping.
+    this.stepper?.stop();
     // Kept on the runner, not in a one-shot field the panel consumes: the
     // panel repaints every frame, and the first version cleared the reason on
     // the first paint, so the next one replaced "stopped: you pressed Reset"
