@@ -56,7 +56,7 @@ import { sampleDocument } from "../geometry/document.js";
 import { PassiveTracer } from "../tracer/passiveScalar.js";
 import { PathlineSet } from "../tracer/pathlines.js";
 import { tracerConfigFor } from "../tracer/seeds.js";
-import { step } from "../solver/ns2d.js";
+import { applyVelocityBoundaryConditions, step } from "../solver/ns2d.js";
 import { momentumBudget } from "../physics/momentumBudget.js";
 import { applyFluid, MAX_CELL_RE } from "../materials/fluids.js";
 import { ProjectError, checkProject } from "../io/project.js";
@@ -373,7 +373,14 @@ export class SimulationSession {
     const { grid, params, timestep } = this.scenario;
     const bc = this.bc;
     const sources = this.sources;
-    const selection = computeStableTimestep(grid, {
+    // Chosen from the field AS THIS STEP WILL ADVECT IT: the velocity with the
+    // boundary pass applied - the same pass step() makes first - on copies, so
+    // the grid step() receives is byte-for-byte what it was. Before this the
+    // choice read the raw field, and a scenario starting from rest chose its
+    // first timestep blind to its own inlet: measured, the field step 1
+    // advected sat at CFL 0.833 on the bends and 0.899 on the jet against a
+    // safety target of 0.4. See docs/inflow-timestep-proposal.md.
+    const selection = computeStableTimestep(this.#advectedField(grid, bc), {
       nu: params.nu,
       safety: timestep.safety,
       previousTimestep: this.lastTimestep,
@@ -643,6 +650,28 @@ export class SimulationSession {
     const budget = momentumBudget(this.grid, bc, params, this.previousU, this.previousV);
     this.budgetCache = { iteration: this.iteration, budget };
     return budget;
+  }
+
+  // The grid's geometry with the velocity the next step will advect: copies of
+  // u and v with the boundary pass applied. Only what the timestep selector
+  // reads; the copies are reused from step to step.
+  #advectedField(grid, bc) {
+    if (this.advectedU?.length !== grid.u.length) {
+      this.advectedU = new Float64Array(grid.u.length);
+      this.advectedV = new Float64Array(grid.v.length);
+    }
+    this.advectedU.set(grid.u);
+    this.advectedV.set(grid.v);
+    applyVelocityBoundaryConditions(grid, bc, this.advectedU, this.advectedV);
+    return {
+      nx: grid.nx,
+      ny: grid.ny,
+      h: grid.h,
+      stride: grid.stride,
+      solid: grid.solid,
+      u: this.advectedU,
+      v: this.advectedV,
+    };
   }
 
   #applyOverrides() {

@@ -17,16 +17,19 @@ at the top of the right sidebar presents them.
 Measured on a headless run in this container. The in-browser numbers are the
 same because it is the same code; only the wall-clock time differs.
 
-The bend row changed when the preconditioned pressure solve was enabled
-(`docs/pressure-preconditioner.md`), from 1.55 ± 0.16, 24% and 6.3: an
-unsteady flow's time average moves within its spread when the solver's path
-does. Every other row is unchanged to the digits shown.
+The bend row has moved twice since M10, each time within its spread, because
+an unsteady flow's time average follows the solver's path. It went from
+1.55 ± 0.16, 24% and 6.3 to 1.53, 23% and 6.5 with the preconditioned
+pressure solve (`docs/pressure-preconditioner.md`), then to the values below
+when the first timestep began to account for the inlet
+(`docs/inflow-timestep-proposal.md`). Every other row is unchanged to the
+digits shown.
 
 | Experiment | Runs | Result |
 |---|---|---|
 | **Pipe flow** | pressure channel, from rest to steady (t = 18.1, 4 s) | mean velocity 1.003 vs dp·w²/(12μL) = 1.000; worst profile error 0.17% of the centreline speed; wall shear 0.3000 vs 6μU/w = 0.3010 — **all three agree** to 1% |
 | **Cylinder wake** | Re 20 and Re 40, each to steady (about 33 s each; 95 s before the preconditioned pressure solve) | L/D = 0.750 and 1.745; growth 2.33× vs 2.47× for the unbounded reference — **comparison only** |
-| **Sharp vs smooth bend** | each averaged over t = 20–35 | pressure drop 1.53 ± 0.11 vs 1.17 ± 0.03 (**23% less** for the smooth bend); separation points on the walls 6.5 ± 1.2 vs 0.6 ± 0.8 |
+| **Sharp vs smooth bend** | each averaged over t = 20–35 | pressure drop 1.54 ± 0.13 vs 1.17 ± 0.03 (**24% less** for the smooth bend); separation points on the walls 6.2 ± 1.2 vs 0.6 ± 0.8 |
 | **Reynolds sweep** | cavity at Re 100, 400, 1000, each to steady (66 s in total; 192 s before the preconditioned pressure solve) | vortex centre 0.5, 0.3, 0.6 cells from Ghia et al. — **all agree** to two cells |
 
 ## 1. Two ways a run ends, and neither is "after N steps"

@@ -295,18 +295,15 @@ deferred lists of M6–M9 and then fell off five milestones' lists unresolved,
 which is what this section exists to prevent. An item leaves this list only
 when it is done or explicitly closed by the owner.
 
-- **Boundary-inflow timestep coupling** (from M6). The first timestep of a
-  scenario that starts from rest is chosen before the boundary pass, so an
-  inlet's speed is invisible to it. Measured with the solver's own CFL: the
-  field step 1 **advects** is at 0.833 (bends) and 0.899 (jet). That is inside
-  the hard limit but about twice the 0.4 safety target. The often-quoted 5.145
-  is the field step 1 **produces**: the projection's impulsive acceleration at
-  the corner, which no timestep chosen in advance can bound. (3.37, quoted
-  once, used a weaker measure.) **Status: proposal written, awaiting the
-  owner's decision.** See `docs/inflow-timestep-proposal.md`: choose the
-  timestep from the field as the step will advect it, which brings step 1 to
-  the 0.4 target and the jet's produced CFL to 0.83.
 - **Convective outflow** (from M4). Unchanged.
+
+Closed: **boundary-inflow timestep coupling** (from M6), adopted by the
+owner. Each timestep is now chosen from the field as the step will advect it,
+so step 1 of a cold start with an inlet runs at the 0.4 safety target instead
+of 0.833 (bends) or 0.899 (jet). The long-quoted 5.145 turned out to be the
+field step 1 produces, not the one it advects. Every claim holds; only the
+three inflow scenarios move, the bends within their spread. See
+`docs/inflow-timestep-proposal.md`.
 
 Closed: the **MIC(0)-preconditioned pressure solve** is enabled by the owner's
 decision (option (a) in `docs/pressure-preconditioner.md`). It gives 4.9–6.3×
