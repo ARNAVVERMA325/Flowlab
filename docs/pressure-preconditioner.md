@@ -115,9 +115,21 @@ of warm-up (node), and of 40 after 30 (browser).
   The gain is real but modest there.
 - **Experiments**, headless, full runs: sweep 143 → 60 s, cylinder 147 → 61 s,
   bends 78 → 38 s.
-- **Room left:** the sweeps could be restructured (precomputed coupling
-  coefficients, fewer branches) without changing a single value. That is
-  optimisation of the new path, deliberately not done before this review.
+- **Room left — tried after enabling, and there is none at this level.**
+  Each change below kept every floating-point operation in the same order,
+  was verified byte-identical against the solver's golden record and all six
+  scenarios' 400-step field hashes, and was then timed back to back with the
+  committed code (cylinder, node):
+  - precomputed MIC coupling flags instead of offset-table lookups: 33.1 →
+    33.4 ms, no gain;
+  - neighbour index lists for the operator: no gain;
+  - fusing the projection, the r·z product and the residual maximum into
+    passes the solve already makes: **slower**, 33 → 38–42 ms. V8 compiles
+    the fused, branchier loops worse than the simple separate ones.
+
+  All of it was reverted, and the committed solve is unchanged. A real further
+  gain needs a different algorithm (for example multigrid), which is a
+  numerics change and would need its own proposal.
 
 ## 5. Before/after, every claim
 

@@ -295,17 +295,17 @@ deferred lists of M6–M9 and then fell off five milestones' lists unresolved,
 which is what this section exists to prevent. An item leaves this list only
 when it is done or explicitly closed by the owner.
 
-- **Boundary-inflow timestep coupling** (from M6). A scenario that starts from
-  rest with a boundary inlet takes its first step outside the convective limit:
-  the timestep is chosen from a field that is still at rest, and the inlet's
-  speed is not in it. Measured with the solver's own CFL, (|u|+|v|)·dt/h at cell
-  centres after step 1: **bend-sharp 5.145, bend-smooth 3.717, jet 1.798**. The
-  cylinder, which starts from a uniform field, is 0.993. These numbers are
-  identical at the M6 commit and today; a figure of 3.37 once quoted for the
-  sharp bend used the largest single face component, which understates the
-  CFL wherever the flow turns diagonally. The timestep corrects itself from
-  step 2. **Status: reconciled, not fixed — awaiting the owner's decision.**
-  Any fix changes numerics and would be its own unit.
+- **Boundary-inflow timestep coupling** (from M6). The first timestep of a
+  scenario that starts from rest is chosen before the boundary pass, so an
+  inlet's speed is invisible to it. Measured with the solver's own CFL: the
+  field step 1 **advects** is at 0.833 (bends) and 0.899 (jet). That is inside
+  the hard limit but about twice the 0.4 safety target. The often-quoted 5.145
+  is the field step 1 **produces**: the projection's impulsive acceleration at
+  the corner, which no timestep chosen in advance can bound. (3.37, quoted
+  once, used a weaker measure.) **Status: proposal written, awaiting the
+  owner's decision.** See `docs/inflow-timestep-proposal.md`: choose the
+  timestep from the field as the step will advect it, which brings step 1 to
+  the 0.4 target and the jet's produced CFL to 0.83.
 - **Convective outflow** (from M4). Unchanged.
 
 Closed: the **MIC(0)-preconditioned pressure solve** is enabled by the owner's
