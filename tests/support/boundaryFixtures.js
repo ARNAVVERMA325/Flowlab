@@ -329,9 +329,14 @@ export const FIXTURE_CASES = [
 // Runs one case and returns the fields. Deterministic by construction: the
 // grid is built fresh, the timestep is fixed rather than adaptive, and nothing
 // here reads a clock or a random source.
-export function runFixtureCase(entry) {
+// `pressureSolver` defaults to "cg", the solver these fixtures were generated
+// with, so the original record keeps pinning the reference solve byte for
+// byte whatever step() defaults to. The preconditioned solve has its own
+// record (tests/fixtures/golden-fields-mic-pcg.json).
+export function runFixtureCase(entry, { pressureSolver = "cg" } = {}) {
   const { grid, bc, params } = entry.build();
-  for (let n = 0; n < STEPS; n++) step(grid, bc, params);
+  const pinned = { ...params, pressureSolver };
+  for (let n = 0; n < STEPS; n++) step(grid, bc, pinned);
   return grid;
 }
 
@@ -345,8 +350,8 @@ function hashField(array) {
 // Scalars alongside the hashes so a failure says something physical before
 // anyone runs the diff tool. A hash mismatch alone tells you that the field
 // changed; `peakU` moving from 1.0 to 0.5 tells you roughly how.
-export function measureFixtureCase(entry) {
-  const grid = runFixtureCase(entry);
+export function measureFixtureCase(entry, options = {}) {
+  const grid = runFixtureCase(entry, options);
   let peakU = 0;
   let peakV = 0;
   let nonFinite = 0;

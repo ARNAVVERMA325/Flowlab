@@ -61,6 +61,15 @@ import {
 } from "../visualization/flowOverlay.js";
 import { traceStreamlines } from "../physics/streamlines.js";
 import { analyseFlow, pressureDropBetween } from "../physics/flowAnalysis.js";
+import { EXPERIMENTS, experimentById } from "../experiments/definitions.js";
+import { ExperimentRunner } from "../experiments/runner.js";
+import { TERMS, termShares } from "../physics/momentumBudget.js";
+import { FLUIDS, MAX_CELL_RE, fluidById } from "../materials/fluids.js";
+import { parseProject, projectFrom } from "../io/project.js";
+import { experimentCsv, fieldCsv, probesCsv, residualsCsv } from "../io/export.js";
+import {
+  DOMINANCE_RULE, TERM_INFO, describeClosure, describeTerm, dominanceEdges,
+} from "./equationExplorer.js";
 import { drawSeries, seriesRange } from "../visualization/timeseries.js";
 import { describeSource } from "../sources/kinds.js";
 import {
@@ -70,11 +79,12 @@ import {
 } from "../visualization/fieldSources.js";
 import { SCENARIOS, DEFAULT_SCENARIO } from "../scenarios/index.js";
 import { SimulationSession, StaleFieldError } from "./session.js";
+import { RemoteStepper, forwardingSession } from "./remoteStepper.js";
 import {
   assessField, classifyRunFailure, isUnprojectedInitialCondition,
 } from "./fieldHealth.js";
 import { ValidationPanel } from "./validationPanel.js";
-import { compact, exponential, fixed, integer, isBad } from "./format.js";
+import { compact, exponential, fixed, integer, isBad, show } from "./format.js";
 
 // Where a sample was taken, and what it says. Split so the probe list can put
 // them on separate lines while the hover readout keeps them on one.
@@ -116,6 +126,7 @@ const TILE_LABELS = {
   q: "Rotation (\u221aQ)",
   continuity: "Continuity",
   dye: "Dye",
+  term: "Equation term",
 };
 
 // Which ramp a view is drawn in, without preparing it. Used for the tile
@@ -125,6 +136,7 @@ function rampForView(id, palette) {
   if (source === undefined) return MAGNITUDE_RAMPS[DEFAULT_MAGNITUDE_RAMP].sample;
   if (id === "velocity") return (MAGNITUDE_RAMPS[palette] ?? MAGNITUDE_RAMPS[DEFAULT_MAGNITUDE_RAMP]).sample;
   if (id === "dye") return sampleDyeRamp;
+  if (id === "term") return MAGNITUDE_RAMPS.viridis.sample;
   return sampleDivergingRamp;
 }
 
@@ -142,6 +154,15 @@ const TOOL_ICONS = {
 
 const STEPS_PER_FRAME = 4;
 const FRAME_BUDGET_MS = 24;
+// While an experiment runs, stepping matters more than repainting: its answer
+// is a measurement at the end, not the picture on the way. So a frame may take
+// more steps and more time - the picture still updates several times a second.
+const EXPERIMENT_STEPS_PER_FRAME = 40;
+const EXPERIMENT_FRAME_BUDGET_MS = 90;
+// In the worker an experiment is stepped in batches of this length: longer
+// than the 16 ms of ordinary running, because an experiment wants throughput
+// and the page keeps drawing either way.
+const EXPERIMENT_BATCH_MS = 50;
 
 // Width of the boundary-condition bands, and the margin they live in. The
 // bands sit BESIDE the field, not over its edge: the outermost cells carry the
@@ -192,6 +213,21 @@ export class Harness {
     this.palette = DEFAULT_MAGNITUDE_RAMP;
     // Frames and steps per second, for the status bar.
     this.perf = { frames: 0, steps: 0, since: performance.now(), fps: null, sps: null };
+    // M14: where the solver runs. In a Web Worker wherever module workers are
+    // available, so the page keeps drawing and answering input however slow a
+    // step is; on this thread otherwise, or when ?compute=main asks for it.
+    // Experiments run in the worker too, with the runner beside the solver so
+    // it still decides after every single step (stepperCore.js).
+    const forced = new URLSearchParams(globalThis.location?.search ?? "").get("compute");
+    this.compute = forced === "main" || typeof Worker === "undefined" ? "main" : "worker";
+    this.computeNote = forced === "main" ? "main thread (requested)" : null;
+    this.stepper = this.compute !== "worker" ? null : new RemoteStepper({
+      createWorker: () => new Worker(new URL("./solverWorker.js", import.meta.url), { type: "module" }),
+      onBatch: (reply) => this.onWorkerBatch(reply),
+      onFault: (message) => this.onWorkerFault(message),
+      onExperiment: (snapshot) => this.onWorkerExperiment(snapshot),
+    });
+    this.workerSteps = 0;
     // Probe display state. The probes themselves live in the session, which is
     // what samples them; these three are only about what is being looked at.
     this.hoverPoint = null;
@@ -207,6 +243,7 @@ export class Harness {
     this.brush = new BrushController({
       getLayout: () => this.layout(),
       onChange: (source) => {
+        if (source !== null) this.interruptExperiment("a brush stroke changed the flow");
         if (this.session.setBrushSource(source)) this.draw();
       },
     });
@@ -233,7 +270,10 @@ export class Harness {
     const { root } = this;
     root.querySelector("#run").addEventListener("click", () => this.run());
     root.querySelector("#pause").addEventListener("click", () => this.pause());
-    root.querySelector("#reset").addEventListener("click", () => this.load(this.scenarioId));
+    root.querySelector("#reset").addEventListener("click", () => {
+      this.interruptExperiment("Reset was pressed");
+      this.load(this.scenarioId);
+    });
     root.querySelector("#reseed").addEventListener("click", () => this.seedTracer());
     root.querySelector("#cleardye").addEventListener("click", () => this.clearTracer());
 
@@ -246,6 +286,7 @@ export class Harness {
     }
     select.value = this.scenarioId;
     select.addEventListener("change", () => {
+      this.interruptExperiment("the scenario was changed by hand");
       this.scenarioId = select.value;
       this.load(this.scenarioId);
     });
@@ -292,6 +333,10 @@ export class Harness {
 
     this.bindDrawingControls();
     this.bindBoundaryControls();
+    this.bindExperimentControls();
+    this.bindEquationControls();
+    this.bindFluidControls();
+    this.bindProjectControls();
   }
 
   // The boundary editor. Unlike a geometry edit this does NOT stop the run or
@@ -402,6 +447,7 @@ export class Harness {
   commitBoundary(apply) {
     try {
       if (!apply()) return false;
+      this.interruptExperiment("a boundary condition was edited");
     } catch (error) {
       // The editor validates by compiling, so an impossible specification is
       // refused with the compiler's own message and the history is untouched.
@@ -544,7 +590,10 @@ export class Harness {
       });
     }
     root.querySelector("#clearsources").addEventListener("click", () => {
-      if (this.session.clearSources()) this.draw();
+      if (this.session.clearSources()) {
+        this.interruptExperiment("the sources were changed");
+        this.draw();
+      }
     });
 
     this.bindProbeControls();
@@ -691,6 +740,7 @@ export class Harness {
       return false;
     }
     if (!changed) return false;
+    this.interruptExperiment("the geometry was edited");
     this.stopLoop();
     this.state = "paused";
     this.failure = null;
@@ -711,6 +761,7 @@ export class Harness {
       // different Reynolds number says so rather than letting "benchmarked"
       // stand beside a flow in another regime.
       scenarioRe: this.scenario.Re ?? null,
+      defaultRe: this.scenario.defaultRe ?? null,
     });
   }
 
@@ -721,6 +772,7 @@ export class Harness {
     this.mode = id;
     this.syncModeTiles();
     this.draw();
+    this.updateEquationPanel();
   }
 
   // The selected tile, and every tile's swatch painted from the ramp its view
@@ -753,7 +805,10 @@ export class Harness {
     // draws it, rather than keeping a second copy of that state which could
     // disagree about whether a field is still valid.
     if (this.session) this.session.load(id);
-    else this.session = new SimulationSession(id);
+    else {
+      const session = new SimulationSession(id);
+      this.session = this.stepper === null ? session : forwardingSession(session, this.stepper);
+    }
     this.failure = null;
     this.failureKind = null;
     this.state = "paused";
@@ -806,7 +861,16 @@ export class Harness {
     canvas.width = grid.nx * scale + 2 * MARGIN;
     canvas.height = grid.ny * scale + 2 * MARGIN;
     canvas.classList.toggle("cells", !this.smooth);
-    this.root.querySelector("#scenariotitle").textContent = this.scenario.label;
+    // The label names the scenario, and its Reynolds number is part of the
+    // name - so when a run overrides Re, the title says so. During a sweep it
+    // read "Lid-driven cavity (Re 1000)" over a run at Re 100.
+    const { Re, defaultRe, material } = this.scenario;
+    this.root.querySelector("#scenariotitle").textContent = material
+      ? `${this.scenario.label} \u2014 ${material.fluid.name}, Re ${show(Re)}`
+      : Number.isFinite(defaultRe) && Re !== defaultRe
+        ? `${this.scenario.label} \u2014 running at Re ${integer(Re)}`
+        : this.scenario.label;
+    this.updateFluidPanel();
   }
 
   // Dye controls only ever touch the tracer. They do not reset the run: the
@@ -815,12 +879,14 @@ export class Harness {
     if (!this.session || !this.tracerConfig.seeded) return;
     this.tracer.clear();
     this.tracer.seed(this.scenario.grid, this.tracerConfig.seed);
+    this.stepper?.markTracerDirty();
     this.draw();
   }
 
   clearTracer() {
     if (!this.session) return;
     this.tracer.clear();
+    this.stepper?.markTracerDirty();
     this.draw();
   }
 
@@ -835,6 +901,7 @@ export class Harness {
   }
 
   pause() {
+    this.stepper?.stop();
     this.stopLoop();
     if (this.state === "running") this.state = "paused";
     if (this.scenario) this.draw();
@@ -844,41 +911,136 @@ export class Harness {
     if (this.state !== "running") return;
     const started = performance.now();
 
+    // In worker mode the solver is elsewhere: this frame only draws whatever
+    // state last arrived. The stepper is (re)started whenever it is idle - at
+    // Run, and after anything that reset the field, which made it stale.
+    if (this.stepper !== null && this.compute === "worker") {
+      if (!this.stepper.active) {
+        const runner = this.experiment?.state === "running" ? this.experiment : null;
+        this.stepper.start(this.session, runner === null ? {} : {
+          experiment: runner.experiment.id,
+          // A fresh start begins the worker's runner on run 1; anything else
+          // is a resume after a pause, and keeps the runner it had.
+          resume: !this.experimentFresh,
+          budgetMs: EXPERIMENT_BATCH_MS,
+        });
+        this.experimentFresh = false;
+      }
+      const steps = this.workerSteps;
+      this.workerSteps = 0;
+      // Repainted only when a batch has landed. Redrawing an unchanged state
+      // sixty times a second took CPU from the worker: measured on the
+      // cylinder, the worker managed 49 steps in the time the main thread
+      // alone managed 84. Every interaction draws for itself, so nothing waits
+      // on this.
+      if (steps > 0) this.draw();
+      this.countFrame(steps);
+      if (this.state === "running") this.frame = requestAnimationFrame(() => this.tick());
+      return;
+    }
+    this.stepper?.stop();
+
     // The timestep is chosen from the field before every step, not fixed for
     // the run. A stability failure is an exception, not a status code, so it
     // is caught here and turned into the same hard stop as a non-finite field.
     let stepsThisFrame = 0;
+    const experimenting = this.experiment?.state === "running";
+    const maxSteps = experimenting ? EXPERIMENT_STEPS_PER_FRAME : STEPS_PER_FRAME;
+    const budget = experimenting ? EXPERIMENT_FRAME_BUDGET_MS : FRAME_BUDGET_MS;
     try {
-      for (let n = 0; n < STEPS_PER_FRAME; n++) {
+      for (let n = 0; n < maxSteps; n++) {
         // One session step: it chooses the timestep from the field, runs the
         // solver, and advects the tracer on the field the solver just
         // produced. It refuses outright if the geometry moved underneath it.
         this.session.advance();
         stepsThisFrame++;
-        if (performance.now() - started > FRAME_BUDGET_MS) break;
+        // The experiment decides after every step - not every frame - so a
+        // run ends on the step its condition was met, whatever the frame rate.
+        if (experimenting && this.experiment.state === "running") {
+          const outcome = this.experiment.afterStep();
+          if (outcome !== "continue") {
+            this.onExperimentOutcome(outcome);
+            break;
+          }
+        }
+        if (performance.now() - started > budget) break;
       }
     } catch (error) {
-      // The decision about what an error MEANS is a pure function in
-      // ui/fieldHealth.js, not a list of instanceof checks inlined in a frame
-      // callback. It went wrong there once - M5 made a rejected geometry
-      // producible from the UI, SolverGeometryError was not in the list, and the
-      // exception escaped into the animation loop - and a decision reachable
-      // only from a browser is a decision node tests cannot ask about.
-      const failure = classifyRunFailure(error, RUN_FAILURE_KINDS);
-      // An unrecognised error is rethrown. A catch-all here would dress a
-      // programming mistake up as a physical failure.
-      if (failure === null) throw error;
-      this.state = "failed";
-      this.stopLoop();
-      this.failure = failure.message;
-      this.failureKind = failure.kind;
-      this.draw();
+      this.handleRunError(error);
       return;
     }
 
     this.draw();
     this.countFrame(stepsThisFrame);
     if (this.state === "running") this.frame = requestAnimationFrame(() => this.tick());
+  }
+
+  // The decision about what an error MEANS is a pure function in
+  // ui/fieldHealth.js, not a list of instanceof checks inlined in a frame
+  // callback. It went wrong there once - M5 made a rejected geometry
+  // producible from the UI, SolverGeometryError was not in the list, and the
+  // exception escaped into the animation loop - and a decision reachable only
+  // from a browser is a decision node tests cannot ask about. One path for a
+  // failure on this thread and one reported by the worker.
+  handleRunError(error) {
+    const failure = classifyRunFailure(error, RUN_FAILURE_KINDS);
+    // An unrecognised error is rethrown. A catch-all here would dress a
+    // programming mistake up as a physical failure.
+    if (failure === null) throw error;
+    if (this.experiment?.state === "running") this.experiment.fail(failure.message);
+    this.stepper?.stop();
+    this.state = "failed";
+    this.stopLoop();
+    this.failure = failure.message;
+    this.failureKind = failure.kind;
+    this.draw();
+  }
+
+  // A batch from the worker has been installed into the session already (see
+  // RemoteStepper); this counts its steps and turns a reported failure back
+  // into the error it was, so it is classified exactly as one thrown here.
+  onWorkerBatch(reply) {
+    this.workerSteps += reply.steps;
+    // A batch that ended the run (an experiment finishing) arrives after the
+    // frame loop has stopped; it is the final picture, so draw it now.
+    if (reply.error === null && this.state !== "running") this.draw();
+    if (reply.error === null) return;
+    const kind = Object.values(RUN_FAILURE_KINDS).find((type) => type.name === reply.error.name);
+    const error = kind ? Object.create(kind.prototype) : new Error();
+    error.name = reply.error.name;
+    error.message = reply.error.message;
+    if (reply.error.details !== null) error.details = reply.error.details;
+    this.handleRunError(error);
+  }
+
+  // The worker's experiment runner reported in. This runner is its mirror: it
+  // adopts the worker's results rather than computing its own. When the worker
+  // has moved to the next run, that run is set up here first - the same load
+  // and Reynolds number - so the state that comes with it fits.
+  onWorkerExperiment(snapshot) {
+    const runner = this.experiment;
+    if (runner === null || runner.state !== "running") {
+      this.stepper.stop();
+      return;
+    }
+    if (snapshot.runIndex !== runner.runIndex) {
+      this.beginExperimentRun(runner.experiment.runs[snapshot.runIndex]);
+      // load() inside that cancelled the frame loop, which on the main
+      // thread is restarted by the tick it happens in. Here it is not.
+      if (this.state === "running" && this.frame === null) {
+        this.frame = requestAnimationFrame(() => this.tick());
+      }
+    }
+    runner.adopt(snapshot);
+    if (snapshot.state === "finished") this.onExperimentOutcome("finished");
+    else this.updateExperimentPanel();
+  }
+
+  // The worker could not reproduce the app's state - which should not happen,
+  // and if it does the run carries on here rather than stopping.
+  onWorkerFault(message) {
+    this.compute = "main";
+    this.computeNote = `main thread - the worker failed: ${message}`;
   }
 
   // Frames and solver steps per second over the last second of running, for
@@ -920,6 +1082,10 @@ export class Harness {
     // A field that has stopped being finite is a hard stop, not a warning.
     if (health.halt && this.state !== "failed") {
       this.state = "failed";
+      // The worker too, or its next batch would install a healthy-looking
+      // field over the one this failure is about (M14; found by the NaN
+      // check failing one run in three - it had passed on timing).
+      this.stepper?.stop();
       this.stopLoop();
       this.failure = health.message;
       this.failureKind = "field";
@@ -935,6 +1101,10 @@ export class Harness {
       sources: this.sourcePlan,
       divergenceTol: this.scenario.params.divergenceTol,
       palette: this.palette,
+      // Only built for the term view: the budget is a second pass over the
+      // field, and the other views have no use for it.
+      shares: this.mode === "term" ? this.currentShares() : null,
+      term: this.equationTerm,
     });
     // The preview and the region overlay are drawn through the renderer's tint
     // hook, inside the loop that already visits every cell, and the count of
@@ -953,6 +1123,7 @@ export class Harness {
     drawSurfaceOutline(this.renderer.context, grid, {
       originX: MARGIN, originY: MARGIN, scale: this.scale, h: grid.h, ny: grid.ny,
     }, { width: Math.max(1, Math.min(2, this.scale / 4)) });
+    if (view?.id === "term") this.drawDominanceOutline(grid);
     drawBoundaryOverlay(this.renderer.context, this.plan, {
       originX: MARGIN,
       originY: MARGIN,
@@ -1034,10 +1205,12 @@ export class Harness {
     chip.dataset.state = this.state;
     chip.textContent = this.state;
     const perf = this.perf;
+    set("#computewhere", this.computeNote ?? (this.compute === "worker" ? "CPU, Web Worker" : "CPU, main thread"));
     set(
       "#perf",
       this.state === "running" && perf.fps !== null
-        ? `${fixed(perf.fps, 0)} fps \u00b7 ${fixed(perf.sps, 0)} steps/s`
+        ? `${fixed(perf.fps, 0)} fps \u00b7 ${fixed(perf.sps, 0)} steps/s` +
+          (this.smooth ? ` \u00b7 render ${fixed(this.renderer.renderAverage ?? 0, 1)} ms at ${this.renderer.lastSubsample} px/cell` : "")
         : "-"
     );
     this.drawResidualChart();
@@ -1048,8 +1221,11 @@ export class Harness {
     this.updateSourcePanel();
     this.updateProbePanel();
     this.updateAnalysisPanel();
+    this.updateEquationPanel();
+    if (this.experiment) this.updateExperimentPanel();
     this.updateBoundaryPanel();
     this.updateGeometryPanel();
+    this.lastView = view;
     this.updateLegend(view);
   }
 
@@ -1255,6 +1431,7 @@ export class Harness {
     };
     try {
       this.session.addSource(source);
+      this.interruptExperiment("a source was placed");
     } catch (error) {
       // A source covering no updatable face is refused by the compiler with a
       // reason - most often placed inside a wall - and saying so beats a click
@@ -1358,6 +1535,579 @@ export class Harness {
     node.textContent = parts.length === 0
       ? "none - streamlines are tangent to the field now, pathlines are where parcels have been"
       : parts.join("  -  ");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Experiments (M10)
+  // ---------------------------------------------------------------------------
+
+  bindExperimentControls() {
+    const { root } = this;
+    const select = root.querySelector("#experiment");
+    for (const experiment of EXPERIMENTS) {
+      const option = document.createElement("option");
+      option.value = experiment.id;
+      option.textContent = experiment.title;
+      select.appendChild(option);
+    }
+    select.addEventListener("change", () => this.describeExperiment());
+    this.experiment = null;
+    root.querySelector("#expstart").addEventListener("click", () => this.startExperiment(select.value));
+    root.querySelector("#expstop").addEventListener("click", () => {
+      if (this.experiment?.state !== "running") return;
+      this.experiment.stop();
+      this.pause();
+      this.updateExperimentPanel();
+    });
+    this.describeExperiment();
+    this.updateExperimentPanel();
+  }
+
+  describeExperiment() {
+    const experiment = experimentById(this.root.querySelector("#experiment").value);
+    if (experiment === null) return;
+    this.root.querySelector("#expquestion").textContent = experiment.question;
+    this.root.querySelector("#expmethod").textContent = experiment.method;
+    this.root.querySelector("#expreference").textContent = `Reference: ${experiment.reference}`;
+  }
+
+  startExperiment(id) {
+    const experiment = experimentById(id);
+    if (experiment === null) return false;
+    this.stopLoop();
+    this.experiment = new ExperimentRunner(experiment, this.session, {
+      onRunStart: (run) => this.beginExperimentRun(run),
+    });
+    this.experimentFresh = true;
+    this.experiment.start();
+    this.state = "running";
+    this.updateExperimentPanel();
+    this.tick();
+    return true;
+  }
+
+  // Sets up one run the way a person would: load the scenario, set its
+  // Reynolds number, choose the view. Everything is rebuilt through the
+  // ordinary paths so the panels describe the run actually happening.
+  beginExperimentRun(run) {
+    this.loadingForExperiment = true;
+    try {
+      this.scenarioId = run.scenario;
+      this.root.querySelector("#scenario").value = run.scenario;
+      this.load(run.scenario);
+      if (run.Re !== undefined) {
+        this.session.setReynolds(run.Re);
+        this.syncScenario();
+        this.renderValidation();
+      }
+    } finally {
+      this.loadingForExperiment = false;
+    }
+    if (run.view?.mode) this.setMode(run.view.mode);
+    for (const [name, on] of Object.entries(run.view?.overlays ?? {})) {
+      this.overlays[name] = on;
+      const box = this.root.querySelector(`#show${name}`);
+      if (box) box.checked = on;
+    }
+    // load() leaves the harness paused; an experiment run is running.
+    this.state = "running";
+  }
+
+  onExperimentOutcome(outcome) {
+    if (outcome === "finished" || outcome === "failed") {
+      this.state = this.state === "failed" ? "failed" : "paused";
+      this.stopLoop();
+    }
+    this.updateExperimentPanel();
+  }
+
+  // Anything a person does that changes the flow invalidates the run being
+  // measured, so the experiment stops and says why rather than reporting a
+  // number for a flow it did not set up.
+  interruptExperiment(reason) {
+    if (this.loadingForExperiment) return;
+    if (this.experiment?.state !== "running") return;
+    this.experiment.stop();
+    // The worker's runner must stop too; the next frame restarts plain stepping.
+    this.stepper?.stop();
+    // Kept on the runner, not in a one-shot field the panel consumes: the
+    // panel repaints every frame, and the first version cleared the reason on
+    // the first paint, so the next one replaced "stopped: you pressed Reset"
+    // with the generic message.
+    this.experiment.interruptedBy = reason;
+    this.updateExperimentPanel();
+  }
+
+  updateExperimentPanel() {
+    const { root } = this;
+    const runner = this.experiment ?? null;
+    const status = root.querySelector("#expstatus");
+    const bar = root.querySelector("#expbar");
+    const results = root.querySelector("#expresults");
+    const summary = root.querySelector("#expsummary");
+    root.querySelector("#expstop").disabled = runner?.state !== "running";
+    root.querySelector("#expstart").disabled = runner?.state === "running";
+    status.classList.remove("bad");
+    if (runner === null) {
+      status.textContent = "choose an experiment and press Start";
+      bar.style.width = "0%";
+      return;
+    }
+    const progress = runner.progress();
+    if (runner.state === "running" && progress !== null) {
+      bar.style.width = `${(progress.fraction * 100).toFixed(1)}%`;
+      const condition = progress.target !== null
+        ? `change rate ${compact(progress.changeRate)} (steady below ${compact(progress.target)})`
+        : progress.sampling
+          ? `averaging: ${integer(progress.samples)} samples`
+          : "start-up transient, not yet sampling";
+      status.textContent =
+        `run ${progress.run} of ${progress.of}: ${progress.label} - t = ${fixed(progress.time, 1)} ` +
+        `of ${fixed(progress.limit, 0)} - ${condition}`;
+    } else if (runner.state === "finished") {
+      bar.style.width = "100%";
+      status.textContent = `finished - ${runner.results.length} runs`;
+    } else if (runner.state === "stopped") {
+      status.textContent = runner.interruptedBy
+        ? `stopped: ${runner.interruptedBy}. Nothing is reported for a flow the experiment did not set up.`
+        : "stopped before it finished; partial runs are not reported";
+      status.classList.add("bad");
+    } else if (runner.state === "failed") {
+      status.textContent = `failed: ${runner.failure}`;
+      status.classList.add("bad");
+    }
+
+    // Results, once they exist, drawn once per change rather than per frame.
+    const signature = `${runner.state}:${runner.results.length}`;
+    if (results.dataset.builtFor === signature) return;
+    results.dataset.builtFor = signature;
+    results.innerHTML = "";
+    summary.textContent = "";
+    if (runner.state !== "finished" || runner.conclusion === null) return;
+
+    // One block per result - the quantity, then measured against reference
+    // and the verdict - rather than a four-column table, which wrapped every
+    // label to four lines in a sidebar.
+    for (const row of runner.conclusion.rows) {
+      const item = document.createElement("div");
+      item.className = "expitem";
+      item.title = row.note ?? "";
+      const name = document.createElement("div");
+      name.className = "expq";
+      name.textContent = row.quantity;
+      const values = document.createElement("div");
+      values.className = "expv";
+      const measured = document.createElement("span");
+      measured.className = "num";
+      measured.textContent = show(row.measured);
+      const reference = document.createElement("span");
+      reference.className = "num ref";
+      reference.textContent = `ref ${show(row.reference)}`;
+      const verdict = document.createElement("span");
+      verdict.className = row.status === "agrees" ? "agrees" : row.status === "differs" ? "differs" : "neutral";
+      verdict.textContent = row.status;
+      values.append(measured, reference, verdict);
+      item.append(name, values);
+      if (row.note) {
+        const note = document.createElement("div");
+        note.className = "expnote";
+        note.textContent = row.note;
+        item.appendChild(note);
+      }
+      results.appendChild(item);
+    }
+
+    // Each run in one line: how it ended. A capped run says NOT steady.
+    const runs = document.createElement("div");
+    runs.className = "runs";
+    for (const run of runner.results) {
+      const line = document.createElement("div");
+      const ending = run.steady === undefined
+        ? `averaged over ${integer(run.sampleCount)} samples`
+        : run.steady ? `steady (rate ${compact(run.changeRate)})` : `NOT steady - capped at rate ${compact(run.changeRate)}`;
+      line.textContent = `${run.label}: ${integer(run.steps)} steps, t = ${fixed(run.time, 1)}, ${ending}`;
+      if (run.steady === false) line.className = "notsteady";
+      runs.appendChild(line);
+    }
+    results.appendChild(runs);
+    summary.textContent = runner.conclusion.summary;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Project and export (M13)
+  // ---------------------------------------------------------------------------
+
+  bindProjectControls() {
+    const { root } = this;
+    const on = (id, handler) => root.querySelector(id).addEventListener("click", handler);
+    on("#projsave", () => this.download(
+      `flowlab-${this.scenarioId}.json`,
+      JSON.stringify(projectFrom(this.session, this.viewSettings()), null, 2),
+      "application/json",
+      "project saved",
+    ));
+    root.querySelector("#projfile").addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      event.target.value = ""; // so choosing the same file again still fires
+      if (file) this.loadProjectText(await file.text(), file.name);
+    });
+    const stem = () => `flowlab-${this.scenarioId}-step${this.session.iteration}`;
+    on("#exportfield", () => this.download(`${stem()}-field.csv`, fieldCsv(this.session), "text/csv", "field exported"));
+    on("#exportprobes", () => this.download(`${stem()}-probes.csv`, probesCsv(this.session), "text/csv", "probe histories exported"));
+    on("#exportresiduals", () => this.download(`${stem()}-residuals.csv`, residualsCsv(this.session), "text/csv", "residuals exported"));
+    on("#exportexperiment", () => {
+      const runner = this.experiment;
+      if (runner?.state !== "finished") {
+        this.setProjectStatus("No finished experiment to export - run one to completion first.", true);
+        return;
+      }
+      this.download(`flowlab-experiment-${runner.experiment.id}.csv`, experimentCsv(runner.experiment, runner), "text/csv", "experiment exported");
+    });
+    on("#exportimage", () => this.downloadCanvas(this.composeImage(), `${stem()}-${this.mode}.png`, "image exported"));
+    on("#exportcharts", () => this.downloadCanvas(this.composeCharts(), `${stem()}-charts.png`, "charts exported"));
+  }
+
+  // What a project remembers about how the picture was arranged. The session
+  // has no view, so the app keeps and restores this part itself.
+  viewSettings() {
+    return {
+      mode: this.mode,
+      overlays: { ...this.overlays },
+      palette: this.palette,
+      smooth: this.smooth,
+      equationTerm: this.equationTerm,
+    };
+  }
+
+  applyViewSettings(view) {
+    if (!view) return;
+    const { root } = this;
+    if (view.palette in MAGNITUDE_RAMPS) {
+      this.palette = view.palette;
+      root.querySelector("#colormap").value = view.palette;
+    }
+    if (typeof view.smooth === "boolean") {
+      this.smooth = view.smooth;
+      root.querySelector("#showcells").checked = !view.smooth;
+    }
+    for (const name of Object.keys(this.overlays)) {
+      const value = Boolean(view.overlays?.[name]);
+      this.overlays[name] = value;
+      const box = root.querySelector(`#show${name}`);
+      if (box) box.checked = value;
+    }
+    if (TERMS.includes(view.equationTerm)) this.equationTerm = view.equationTerm;
+    if (FIELD_SOURCES.some((source) => source.id === view.mode)) this.setMode(view.mode);
+  }
+
+  loadProjectText(text, name = "project") {
+    let view;
+    try {
+      view = this.session.importProject(parseProject(text));
+    } catch (error) {
+      this.setProjectStatus(`${name} was not loaded: ${error.message}`, true);
+      return false;
+    }
+    this.interruptExperiment("a project was loaded");
+    this.stopLoop();
+    this.scenarioId = this.session.scenarioId;
+    this.root.querySelector("#scenario").value = this.scenarioId;
+    this.failure = null;
+    this.failureKind = null;
+    this.state = "paused";
+    this.editMessage = null;
+    this.fluidMessage = null;
+    this.drawing.cancel();
+    this.probeSelection = null;
+    this.hoverPoint = null;
+    this.syncScenario();
+    this.syncBoundaryForm();
+    this.root.querySelector("#note").textContent = this.scenario.note;
+    this.renderValidation();
+    this.applyViewSettings(view);
+    this.draw();
+    this.setProjectStatus(`loaded ${name}: ${this.scenario.label}, from rest - press Run`);
+    return true;
+  }
+
+  setProjectStatus(text, bad = false) {
+    const status = this.root.querySelector("#projstatus");
+    status.textContent = text;
+    status.classList.toggle("bad", bad);
+  }
+
+  // Hands a file to the browser. Also kept on the harness as lastDownload, so
+  // a check can read exactly what was offered without a filesystem.
+  download(name, content, type, what) {
+    const blob = content instanceof Blob ? content : new Blob([content], { type });
+    this.lastDownload = { name, type: blob.type, size: blob.size, content: typeof content === "string" ? content : null };
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    this.setProjectStatus(`${what}: ${name}`);
+  }
+
+  downloadCanvas(canvas, name, what) {
+    canvas.toBlob((blob) => {
+      if (blob === null) {
+        this.setProjectStatus("the image could not be encoded", true);
+        return;
+      }
+      this.download(name, blob, "image/png", what);
+      this.lastDownload.width = canvas.width;
+      this.lastDownload.height = canvas.height;
+    }, "image/png");
+  }
+
+  // The field exactly as drawn, with a title and the legend under it - an
+  // image without its scale is a picture, not a result.
+  composeImage() {
+    const field = this.root.querySelector("#field");
+    const band = 64;
+    const out = document.createElement("canvas");
+    out.width = field.width;
+    out.height = field.height + band;
+    const ctx = out.getContext("2d");
+    ctx.fillStyle = "#070b12";
+    ctx.fillRect(0, 0, out.width, out.height);
+    ctx.drawImage(field, 0, 0);
+    const text = (id) => this.root.querySelector(id).textContent;
+    const y0 = field.height;
+    ctx.fillStyle = "#e6ebf2";
+    ctx.font = "600 14px sans-serif";
+    ctx.fillText(`${text("#scenariotitle")} - t = ${fixed(this.session.simulatedTime, 3)}`, 12, y0 + 20);
+    const barX = 12;
+    const barW = Math.min(360, out.width - 24);
+    const gradient = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+    const view = this.lastView;
+    for (let k = 0; k <= 24; k++) {
+      gradient.addColorStop(k / 24, view ? samplerCss(view.ramp, k / 24) : "#000");
+    }
+    ctx.fillStyle = gradient;
+    ctx.fillRect(barX, y0 + 30, barW, 10);
+    ctx.fillStyle = "#8a97ab";
+    ctx.font = "12px sans-serif";
+    ctx.fillText(text("#legendmin"), barX, y0 + 56);
+    const max = text("#legendmax");
+    ctx.fillText(max, barX + barW - ctx.measureText(max).width, y0 + 56);
+    ctx.fillText(text("#legendtitle"), barX + barW + 16, y0 + 40);
+    return out;
+  }
+
+  composeCharts() {
+    const charts = ["#residualchart", "#probechart"].map((id) => this.root.querySelector(id));
+    const out = document.createElement("canvas");
+    out.width = Math.max(...charts.map((c) => c.width));
+    out.height = charts.reduce((sum, c) => sum + c.height, 0);
+    const ctx = out.getContext("2d");
+    ctx.fillStyle = "#0e1522";
+    ctx.fillRect(0, 0, out.width, out.height);
+    let y = 0;
+    for (const chart of charts) {
+      ctx.drawImage(chart, 0, y);
+      y += chart.height;
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Fluid (M12)
+  // ---------------------------------------------------------------------------
+
+  bindFluidControls() {
+    const { root } = this;
+    const select = root.querySelector("#fluid");
+    const add = (value, text) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      select.appendChild(option);
+    };
+    add("scenario", "Scenario fluid (as built, dimensionless)");
+    for (const fluid of FLUIDS) add(fluid.id, fluid.name);
+    add("custom", "Custom fluid...");
+    select.addEventListener("change", () => {
+      root.querySelector("#fluidcustom").hidden = select.value !== "custom";
+    });
+    root.querySelector("#fluidapply").addEventListener("click", () => this.applyFluid());
+    this.fluidMessage = null;
+    this.updateFluidPanel();
+  }
+
+  // A new fluid is a new problem, so the field is rebuilt from rest - through
+  // the session, which refuses what it cannot run and changes nothing then.
+  applyFluid() {
+    const { root } = this;
+    const choice = root.querySelector("#fluid").value;
+    let fluid = null;
+    if (choice === "custom") {
+      fluid = {
+        id: "custom",
+        name: "Custom fluid",
+        rho: Number(root.querySelector("#fluidrho").value),
+        mu: Number(root.querySelector("#fluidmu").value),
+      };
+    } else if (choice !== "scenario") {
+      fluid = fluidById(choice);
+    }
+    try {
+      this.session.setMaterial(fluid);
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      this.fluidMessage = { text: error.message, bad: true };
+      this.updateFluidPanel();
+      return;
+    }
+    this.interruptExperiment("the fluid was changed");
+    this.fluidMessage = null;
+    this.stopLoop();
+    this.failure = null;
+    this.failureKind = null;
+    this.state = "paused";
+    this.syncScenario();
+    this.renderValidation();
+    this.draw();
+  }
+
+  updateFluidPanel() {
+    const { root } = this;
+    // Called from syncScenario, which can run before the controls are bound,
+    // and bound before the first scenario is loaded - both are no-ops.
+    if (!root.querySelector("#fluid").options.length || !this.session) return;
+    const material = this.scenario.material ?? null;
+    const set = (id, text) => { root.querySelector(id).textContent = text; };
+    const status = root.querySelector("#fluidstatus");
+    if (!this.fluidMessage) {
+      root.querySelector("#fluid").value = material ? material.fluid.id : "scenario";
+      root.querySelector("#fluidcustom").hidden = !material || material.fluid.id !== "custom";
+    }
+    if (material === null) {
+      const { params, Re } = this.scenario;
+      set("#fluidrhoout", `${show(params.rho)} (scenario units)`);
+      set("#fluidmuout", "-");
+      set("#fluidnu", `${show(params.nu)} (scenario units)`);
+      set("#fluidsize", "dimensionless");
+      set("#fluidre", show(Re));
+      set("#fluidcellre", "-");
+    } else {
+      const { fluid, physical, Re, cellRe } = material;
+      set("#fluidrhoout", `${show(fluid.rho)} kg/m\u00b3`);
+      set("#fluidmuout", `${show(fluid.mu)} Pa\u00b7s`);
+      set("#fluidnu", `${show(physical.nu)} m\u00b2/s`);
+      set("#fluidsize", `${show(physical.length * 100)} cm (${this.scenario.reference.length}), ${show(physical.speed * 100)} cm/s`);
+      set("#fluidre", show(Re));
+      set("#fluidcellre", `${show(cellRe)} (limit ${MAX_CELL_RE})`);
+    }
+    status.classList.toggle("bad", Boolean(this.fluidMessage?.bad));
+    status.textContent = this.fluidMessage
+      ? `Refused: ${this.fluidMessage.text}`
+      : material
+        ? `${material.fluid.name} in the same apparatus. Press Run.`
+        : "The scenario's own fluid. Choose a real one and press Apply.";
+  }
+
+  // ---------------------------------------------------------------------------
+  // Equation explorer (M11)
+  // ---------------------------------------------------------------------------
+
+  // The equation's terms are buttons. Choosing one switches the picture to that
+  // term's share of the momentum budget and outlines where it dominates; the
+  // words beside it are written from the same measured budget.
+  bindEquationControls() {
+    const { root } = this;
+    this.equationTerm = "advection";
+    this.sharesCache = null;
+    for (const button of root.querySelectorAll("#equation .eqterm")) {
+      button.addEventListener("click", () => this.selectTerm(button.dataset.term));
+    }
+    // The constraint is not a term with a budget - it is what the pressure
+    // exists to enforce - so it opens the view that shows how well it holds.
+    root.querySelector("#eqconstraint").addEventListener("click", () => this.setMode("continuity"));
+    root.querySelector("#eqrule").textContent = DOMINANCE_RULE;
+    this.updateEquationPanel();
+  }
+
+  selectTerm(term) {
+    if (!TERMS.includes(term)) return;
+    this.equationTerm = term;
+    this.setMode("term");
+  }
+
+  // termShares() for the current step, computed once per step however many
+  // frames ask for it.
+  currentShares() {
+    const budget = this.session.momentumBudget();
+    if (budget === null) return null;
+    const iteration = this.session.iteration;
+    if (this.sharesCache?.budget !== budget) {
+      this.sharesCache = { budget, iteration, shares: termShares(this.scenario.grid, budget) };
+    }
+    return this.sharesCache.shares;
+  }
+
+  drawDominanceOutline(grid) {
+    const shares = this.currentShares();
+    if (shares === null) return;
+    const segments = dominanceEdges(grid, shares.dominant, TERMS.indexOf(this.equationTerm));
+    const ctx = this.renderer.context;
+    const s = this.scale;
+    const top = MARGIN + grid.ny * s;
+    ctx.save();
+    ctx.lineCap = "square";
+    // A dark line under a light one, so the outline reads on both ends of the
+    // ramp - viridis runs from near-black to pale yellow.
+    for (const [style, width] of [["rgba(0,0,0,0.75)", 3], ["#f8fafc", 1.25]]) {
+      ctx.strokeStyle = style;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      for (const { x0, y0, x1, y1 } of segments) {
+        ctx.moveTo(MARGIN + x0 * s, top - y0 * s);
+        ctx.lineTo(MARGIN + x1 * s, top - y1 * s);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  updateEquationPanel() {
+    const { root } = this;
+    const term = this.equationTerm;
+    if (term === undefined) return; // before bindEquationControls has run
+    const showing = this.mode === "term";
+    for (const button of root.querySelectorAll("#equation .eqterm")) {
+      const on = button.dataset.term === term;
+      button.classList.toggle("on", on && showing);
+      button.setAttribute("aria-pressed", on && showing ? "true" : "false");
+    }
+    const info = TERM_INFO[term];
+    root.querySelector("#eqname").textContent = `${info.symbol}  -  ${info.name}`;
+    root.querySelector("#eqexplain").textContent = info.explain;
+    const where = root.querySelector("#eqwhere");
+    const closure = root.querySelector("#eqclosure");
+    // The budget is a second pass over the field, so it is only taken while
+    // the term view is up - every other view costs exactly what it did.
+    if (!showing) {
+      where.textContent = "Click a term in the equation to see where it acts in this flow.";
+      closure.textContent = "";
+      closure.classList.remove("bad");
+      return;
+    }
+    const budget = this.session.momentumBudget();
+    if (budget === null) {
+      where.textContent =
+        "Take at least one step to see where this term acts: the budget describes a step, and none has been taken since the last reset.";
+      closure.textContent = "";
+      return;
+    }
+    const shares = this.currentShares();
+    where.textContent = describeTerm(term, shares);
+    closure.textContent = describeClosure(budget);
+    closure.classList.toggle("bad", !(budget.relativeClosure < 1e-9));
   }
 
   // ---------------------------------------------------------------------------
@@ -1720,6 +2470,7 @@ export class Harness {
       drop.textContent = "remove";
       drop.addEventListener("click", () => {
         session.removeSource(index);
+        this.interruptExperiment("a source was removed");
         this.draw();
       });
       row.append(label, text, drop);
@@ -1914,8 +2665,16 @@ export class Harness {
       return;
     }
     const cssPerUnit = (this.scale / this.scenario.grid.h) * (rect.width / canvas.width);
-    line.style.width = `${Math.max(8, reference.L * cssPerUnit)}px`;
-    label.textContent = `${reference.length} = ${compact(reference.L)}`;
+    // The largest simple fraction of the reference length that fits in about
+    // 150 CSS pixels. The whole length did not always fit: the cavity's side is
+    // the whole canvas, and a scale bar that wide squeezed the legend beside it.
+    const fractions = [1, 0.5, 0.25, 0.2, 0.1, 0.05];
+    const fraction = fractions.find((f) => reference.L * f * cssPerUnit <= 150) ?? 0.05;
+    const length = reference.L * fraction;
+    line.style.width = `${Math.max(8, length * cssPerUnit)}px`;
+    label.textContent = fraction === 1
+      ? `${reference.length} = ${compact(reference.L)}`
+      : `${compact(fraction)} x ${reference.length} = ${compact(length)}`;
   }
 
   // The continuity error after every solver step, on a log axis with the

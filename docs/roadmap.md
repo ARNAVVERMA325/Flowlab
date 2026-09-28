@@ -242,14 +242,79 @@ Not scheduled. Do not start any of these while a NOW milestone is open.
   from, and a test asserts Re = U·L/ν.*
 - **M10 — Experiment mode**: guided scenarios — pipe flow, flow around a cylinder, sharp vs.
   smooth bend, Reynolds-number sweep
+  *Built — see `docs/M10-experiments.md`. A run ends **steady** (measured change rate
+  below a tolerance on U²/L; a run that hits its time cap is reported NOT steady) or
+  **averaged** over a window with its spread — the bends never settle at Re 200. The
+  Reynolds override ν = UL/Re is **refused for the pressure-driven channel**, whose
+  speed is itself set by ν. Pipe agrees with Poiseuille to 1% on all three measures; the
+  sweep puts every vortex centre within 0.6 cells of Ghia; the cylinder is comparison
+  only (18% blockage, unverified unbounded reference).*
 - **M11 — Equation explorer**: governing equations in the UI; click a term
   (`∂u/∂t`, `u·∇u`, `−∇p`, `μ∇²u`, `f`) to get an explanation *and* a highlight of where
   that effect currently dominates
+  *Built — see `docs/M11-equation-explorer.md`. Every term is computed with the solver's
+  own stencils from the step it just took, and ∂u/∂t is measured rather than computed,
+  so the budget must **close** — it does, to 1e-15..3e-14 of the largest term in every
+  scenario, and the panel prints the check. "Dominates" needs a **10% margin**: naming
+  the plain largest called the developed channel 100% pressure-dominated, when it is
+  exactly a pressure-viscous balance — now reported as one.*
 - **M12 — Materials**: water, air, custom fluid; density and viscosity must genuinely
   affect the solver
+  *Built — see `docs/M12-materials.md`. Each scenario as shipped is water at 1 cm/s in an
+  apparatus of stated size; another fluid fills the same apparatus. Measured: with speeds
+  prescribed the velocity depends only on ν = μ/ρ (identical to 8.6e-16 at 10× density,
+  pressure exactly 10×); with a pressure prescribed the flow rate goes as 1/μ (air/water
+  54.9041 against 54.9041). A fluid that would exceed a cell Reynolds number of 20 — past
+  anything here has been checked at — is **refused** (mercury, in every velocity-driven
+  scenario).*
 - **M13 — Import / export**: save and load projects, export data/CSV/images/graphs
+  *Built — see `docs/M13-import-export.md`. A project is the setup, not the field: the
+  solver is deterministic, and a test loads a saved project into a fresh session, runs 40
+  steps and requires the field **byte-identical** to the original's. Loading is validated
+  by building the project on a scratch session first, so a refusal changes nothing.
+  Exports are full precision (every value round-trips with ===) and write NaN as NaN.*
 - **M14 — Performance**: Web Workers, WebGL/WebGPU, adaptive resolution. UI must stay
   responsive; the sim loop must never freeze the app
+  *Built — see `docs/M14-performance.md`. Measured first: a cylinder step is 92–168 ms
+  against a 24 ms frame, drawing at most 9.4 ms — so the solver moved to a **Web Worker**
+  (p95 frame gap 114–142 ms → 20–24 ms, click-to-effect 1.3 s → 0.1 s, ~8% throughput
+  spent on the handoff), proved **byte-identical** to main-thread stepping with edits made
+  mid-run; the smooth renderer's **display** resolution adapts to its own frame time. Not
+  built, on the measurements: WebGL rendering (drawing already fits the frame); a GPU
+  solver or preconditioned pressure solve is the biggest remaining speed-up but changes
+  the arithmetic and the golden fields — **flagged for a decision**. Experiments now run
+  in the worker too, with the same byte-identity proof.*
+
+---
+
+# OPEN — Carried items
+
+Deferred items that outlive a milestone are listed HERE, not only in each
+milestone's own document. The boundary-inflow item below was carried in the
+deferred lists of M6–M9 and then fell off five milestones' lists unresolved,
+which is what this section exists to prevent. An item leaves this list only
+when it is done or explicitly closed by the owner.
+
+- **Convective outflow** (from M4). Unchanged.
+
+Closed: **boundary-inflow timestep coupling** (from M6), adopted by the
+owner. Each timestep is now chosen from the field as the step will advect it,
+so step 1 of a cold start with an inlet runs at the 0.4 safety target instead
+of 0.833 (bends) or 0.899 (jet). The long-quoted 5.145 turned out to be the
+field step 1 produces, not the one it advects. Every claim holds; only the
+three inflow scenarios move, the bends within their spread. See
+`docs/inflow-timestep-proposal.md`.
+
+Closed: the **MIC(0)-preconditioned pressure solve** is enabled by the owner's
+decision (option (a) in `docs/pressure-preconditioner.md`). It gives 4.9–6.3×
+fewer iterations and 1.5–2.6× faster steps (1.51–1.64× in the browser), and
+every claim was re-validated. The M6 split-chamber test now requires refusal
+at every bound tighter than the forced imbalance, and a truthful report
+above it.
+
+Refusals signed off by the owner: M8's density view (one uniform density, so it
+would carry no information) and M9's integrated drag and lift (the staircase
+perimeter does not converge to the true one at any resolution).
 
 ---
 

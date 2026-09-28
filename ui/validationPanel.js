@@ -65,7 +65,7 @@ export class ValidationPanel {
   // against the scenario's own, not from an edit counter. `scenarioRe` is the
   // Reynolds number the scenario is actually running at, so a case benchmarked
   // at a different one can say so.
-  render(scenarioId, { geometryEdited = false, scenarioRe = null } = {}) {
+  render(scenarioId, { geometryEdited = false, scenarioRe = null, defaultRe = null } = {}) {
     const info = validationForScenario(scenarioId);
     const set = (id, text, cls) => {
       const node = this.root.querySelector(id);
@@ -186,6 +186,24 @@ export class ValidationPanel {
         `numbers describe the solver, not the flow currently on screen - the two ` +
         `Reynolds numbers can be in genuinely different regimes.`;
       detail.appendChild(mismatch);
+    }
+
+    // The run's Reynolds number moved away from the scenario's own - an
+    // experiment's sweep, or a changed fluid. The record was measured at the
+    // scenario's value, so it describes a different operating point from the
+    // one on screen, and says so. (When the case declares its own benchmark
+    // point the note above already covers it.)
+    if (
+      !Number.isFinite(benchmarkRe) && Number.isFinite(defaultRe) && Number.isFinite(scenarioRe)
+      && Math.abs(defaultRe - scenarioRe) > 1e-9
+    ) {
+      const moved = document.createElement("p");
+      moved.className = "vnote bad";
+      moved.textContent =
+        `This run is at Re = ${fixed(scenarioRe, 0)}; the record above was measured ` +
+        `with the scenario at its own Re = ${fixed(defaultRe, 0)}. It describes the ` +
+        `solver on that configuration, not the run on screen.`;
+      detail.appendChild(moved);
     }
 
     if (record.caveat) {

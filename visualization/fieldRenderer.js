@@ -57,12 +57,28 @@ import { LUT_SIZE, NON_FINITE_COLOUR, SOLID_COLOUR, lutFor } from "./colormap.js
 // cells - but here it blends buffer pixels a quarter of a cell or less apart,
 // whose colours are already nearly equal, so no hue appears that the data does
 // not contain.
-const PIXEL_BUDGET = 120000;
+export const PIXEL_BUDGET = 120000;
 const MIN_SUBSAMPLE = 2;
 
-export function subsampleFor(nx, ny, scale) {
-  const fit = Math.floor(Math.sqrt(PIXEL_BUDGET / (nx * ny)));
+export function subsampleFor(nx, ny, scale, budget = PIXEL_BUDGET) {
+  const fit = Math.floor(Math.sqrt(budget / (nx * ny)));
   return Math.max(1, Math.min(Math.max(MIN_SUBSAMPLE, fit), Math.round(scale), 16));
+}
+
+// ADAPTIVE RESOLUTION (M14). The budget above was measured on one machine. A
+// slower one would spend it past the frame, and a fixed number cannot know
+// that - so the renderer times each smooth frame and moves its own budget:
+// halved when the average passes RENDER_TARGET_MS, doubled back (never past
+// the measured default) when it is comfortably under. Only the display's
+// resolution moves. The simulation's grid never does: a coarser grid is a
+// different computation, not a cheaper picture of the same one.
+export const RENDER_TARGET_MS = 12;
+export const MIN_PIXEL_BUDGET = 15000;
+
+export function adaptBudget(budget, averageMs) {
+  if (averageMs > RENDER_TARGET_MS && budget > MIN_PIXEL_BUDGET) return Math.max(MIN_PIXEL_BUDGET, budget / 2);
+  if (averageMs < RENDER_TARGET_MS / 3 && budget < PIXEL_BUDGET) return Math.min(PIXEL_BUDGET, budget * 2);
+  return budget;
 }
 
 // The blend rule, and the only implementation of it: the four cell centres
@@ -134,6 +150,10 @@ export class FieldRenderer {
     this.bufferContext = this.buffer.getContext("2d", { alpha: false });
     this.image = null;
     this.values = null;
+    this.pixelBudget = PIXEL_BUDGET;
+    this.renderAverage = null;
+    this.renderFrames = 0;
+    this.lastSubsample = 1;
   }
 
   // `view` comes from visualization/fieldSources.prepareView: it carries the
@@ -149,8 +169,24 @@ export class FieldRenderer {
   // `tint` optionally returns [r, g, b, alpha] for a cell, blended over
   // whatever the view painted there.
   render(grid, view, inset = 0, tint = null, { smooth = true, scale = 1 } = {}) {
+    const started = performance.now();
+    this.renderInner(grid, view, inset, tint, { smooth, scale });
+    if (!smooth) return;
+    // An average over a few frames, so one slow frame (a GC pause, a tab
+    // switch) does not halve the picture.
+    const ms = performance.now() - started;
+    this.renderAverage = this.renderAverage === null ? ms : 0.8 * this.renderAverage + 0.2 * ms;
+    this.renderFrames++;
+    if (this.renderFrames >= 8) {
+      this.pixelBudget = adaptBudget(this.pixelBudget, this.renderAverage);
+      this.renderFrames = 0;
+    }
+  }
+
+  renderInner(grid, view, inset, tint, { smooth, scale }) {
     const { nx, ny } = grid;
-    const sub = smooth ? subsampleFor(nx, ny, scale) : 1;
+    const sub = smooth ? subsampleFor(nx, ny, scale, this.pixelBudget) : 1;
+    this.lastSubsample = sub;
     const width = nx * sub;
     const height = ny * sub;
 

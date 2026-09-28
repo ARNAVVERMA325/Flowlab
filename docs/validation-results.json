@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-21 18:12:50 UTC",
+  "generatedAt": "2026-09-27 06:41:19 UTC",
   "cases": {
     "still-water": {
       "label": "Still water",
@@ -109,7 +109,7 @@
         {
           "quantity": "max|u - Ghia| at Re=100",
           "reference": 0,
-          "measured": 0.003801914606736262,
+          "measured": 0.003801911248306561,
           "tolerance": 0.015,
           "relative": false,
           "referenceType": "published",
@@ -118,7 +118,7 @@
         {
           "quantity": "max|v - Ghia| at Re=100",
           "reference": 0,
-          "measured": 0.008545232569153544,
+          "measured": 0.00854523238856525,
           "tolerance": 0.015,
           "relative": false,
           "referenceType": "published",
@@ -127,7 +127,7 @@
         {
           "quantity": "max|u - Ghia| at Re=400",
           "reference": 0,
-          "measured": 0.00733363435528539,
+          "measured": 0.007333632540942769,
           "tolerance": 0.015,
           "relative": false,
           "referenceType": "published",
@@ -136,7 +136,7 @@
         {
           "quantity": "max|u - Ghia| at Re=1000",
           "reference": 0,
-          "measured": 0.017895479397926295,
+          "measured": 0.017895475441320807,
           "tolerance": 0.035,
           "relative": false,
           "referenceType": "published",
@@ -145,7 +145,7 @@
         {
           "quantity": "self-convergence order",
           "reference": 2,
-          "measured": 1.9053784264666385,
+          "measured": 1.9053789577500642,
           "tolerance": 0.3,
           "relative": false,
           "referenceType": "self-convergence",
@@ -167,7 +167,7 @@
         {
           "quantity": "wake L/D at Re=20, 6% blockage",
           "reference": 0.93,
-          "measured": 1.0331842587154236,
+          "measured": 1.0331842599790084,
           "tolerance": 0.15,
           "relative": true,
           "referenceType": "published",
@@ -194,7 +194,7 @@
         {
           "quantity": "flux deviation through all cuts (relative)",
           "reference": 0,
-          "measured": 2.5265971627811027e-10,
+          "measured": 6.356065787072947e-11,
           "tolerance": 1e-7,
           "relative": false,
           "referenceType": "invariant",
@@ -203,7 +203,7 @@
         {
           "quantity": "centreline asymmetry",
           "reference": 0,
-          "measured": 5.38841957165026e-11,
+          "measured": 3.6559844041050837e-10,
           "tolerance": 1e-9,
           "relative": false,
           "referenceType": "invariant",
@@ -225,7 +225,7 @@
         {
           "quantity": "inlet-leg dp/dx vs -12*mu*U/w^2 (relative)",
           "reference": 0,
-          "measured": 0.007791980156721296,
+          "measured": 0.007791568880502289,
           "tolerance": 0.02,
           "relative": false,
           "referenceType": "analytical",
@@ -234,7 +234,7 @@
         {
           "quantity": "inlet-leg profile convergence order",
           "reference": 2,
-          "measured": 1.9323716370763335,
+          "measured": 1.932375782466292,
           "tolerance": 0.3,
           "relative": false,
           "referenceType": "analytical",
@@ -243,7 +243,7 @@
         {
           "quantity": "flux deviation through all cuts (relative)",
           "reference": 0,
-          "measured": 6.906166083453513e-9,
+          "measured": 4.197447678322419e-8,
           "tolerance": 0.000001,
           "relative": false,
           "referenceType": "invariant",
@@ -292,7 +292,7 @@
         {
           "quantity": "U_mean vs dp*w^2/(12*mu*L) at 32 cells (relative)",
           "reference": 0,
-          "measured": 0.0019531249855743173,
+          "measured": 0.001953125033883008,
           "tolerance": 0.01,
           "relative": false,
           "referenceType": "analytical",
@@ -301,7 +301,7 @@
         {
           "quantity": "U_mean vs dp*w^2/(12*mu*L) at 16 cells (relative)",
           "reference": 0,
-          "measured": 0.007812500285755532,
+          "measured": 0.007812500175197969,
           "tolerance": 0.02,
           "relative": false,
           "referenceType": "analytical",
@@ -310,7 +310,7 @@
         {
           "quantity": "convergence order of the flow-rate error",
           "reference": 2,
-          "measured": 2.0000000634247073,
+          "measured": 2.0000000073249087,
           "tolerance": 0.2,
           "relative": false,
           "referenceType": "analytical",
@@ -319,7 +319,7 @@
         {
           "quantity": "flux deviation inlet to outlet",
           "reference": 0,
-          "measured": 9.113043653030672e-11,
+          "measured": 4.078959392472825e-13,
           "tolerance": 1e-8,
           "relative": false,
           "referenceType": "invariant",
@@ -373,7 +373,7 @@
         {
           "quantity": "max|div u| with a surface inlet driving the flow",
           "reference": 0,
-          "measured": 9.398658884496314e-8,
+          "measured": 5.918802760407349e-8,
           "tolerance": 1e-7,
           "relative": false,
           "referenceType": "invariant",
@@ -391,7 +391,7 @@
         {
           "quantity": "mass source: flux delivered vs requested",
           "reference": 0,
-          "measured": 6.938893903907228e-18,
+          "measured": 0,
           "tolerance": 1e-11,
           "relative": false,
           "referenceType": "invariant",
@@ -400,7 +400,7 @@
         {
           "quantity": "continuity error with a source driving the flow",
           "reference": 0,
-          "measured": 8.570185938000519e-8,
+          "measured": 7.030921825995629e-8,
           "tolerance": 1e-7,
           "relative": false,
           "referenceType": "invariant",
@@ -538,7 +538,7 @@
         {
           "quantity": "wall shear vs plane Poiseuille, order of convergence",
           "reference": 2,
-          "measured": 1.9907289482607915,
+          "measured": 1.9907274234146974,
           "tolerance": 0.2,
           "relative": false,
           "referenceType": "analytical",

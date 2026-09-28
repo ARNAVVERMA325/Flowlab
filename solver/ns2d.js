@@ -902,6 +902,278 @@ function solvePressurePoisson(grid, rhs, cells, { residualTol, maxIterations }) 
   return { iterations, residual, converged };
 }
 
+// Pressure Poisson solve: conjugate gradient preconditioned with MIC(0), the
+// modified incomplete Cholesky factorisation of the same operator.
+//
+// WHAT CHANGES, AND WHAT DOES NOT. The equations are the ones above - the same
+// operator (fluid-cell Laplacian, Neumann faces dropped, Dirichlet faces folded
+// into `counts`), the same right-hand side, the same warm start from the
+// previous pressure, and the same stopping test on the TRUE residual
+// max|rhs - A p| against the same bound. step()'s continuity check after the
+// solve is untouched, so the divergence guarantee is exactly what it was. Only
+// the path to a residual below the bound changes, which means the pressure
+// that comes out differs from plain CG's by whatever the bound allows - and so
+// every field downstream differs at that level.
+//
+// THE FACTORISATION. CG runs on L = -h^2 A, which is symmetric positive
+// semi-definite. For each fluid cell, in the grid's own row-major order (so
+// the neighbours at k-1 and k-stride are already factored):
+//
+//   e = c - (a_w * P_w)^2 - (a_s * P_s)^2
+//         - tau * (a_w * a_ne(w) * P_w^2 + a_s * a_nw(s) * P_s^2)
+//   P = 1 / sqrt(e)
+//
+// with c the cell's diagonal, a_* = -1 where the named neighbour is fluid, tau
+// the modification (0.97, not 1: the fully modified factor loses definiteness
+// on exactly the pure-Neumann problems this solver has), and a floor - if e
+// falls below SIGMA * c the unmodified diagonal is used - which keeps every
+// pivot positive, including the zero last pivot of a singular region. So M is
+// symmetric positive definite and PCG's theory applies.
+//
+// If PCG ever breaks down anyway (a non-positive r.z or d.Ld, or a non-finite
+// value) that solve falls back to plain CG from the current iterate and the
+// fallback is COUNTED in the step's report. It never happens silently.
+const MIC_TAU = 0.97;
+const MIC_SIGMA = 0.25;
+
+function micPreconditioner(grid, cells) {
+  if (cells.work.precon) return cells.work.precon;
+  const { stride } = grid;
+  const { fluid, offsets, counts } = cells;
+  const precon = new Float64Array(grid.u.length);
+  // a(k, +1): is the east neighbour fluid; a(k, +stride): the north one.
+  const east = (k) => offsets[k * 4 + 1] !== 0;
+  const north = (k) => offsets[k * 4 + 3] !== 0;
+  for (let m = 0; m < fluid.length; m++) {
+    const k = fluid[m];
+    const c = counts[k];
+    if (c === 0) { precon[k] = 0; continue; }
+    let e = c;
+    const w = k - 1;
+    const sth = k - stride;
+    // The west neighbour couples to k through its east link, the south one
+    // through its north link; both are earlier in the ordering.
+    if (offsets[k * 4] !== 0 && east(w)) {
+      const pw = precon[w];
+      e -= pw * pw;
+      if (north(w)) e -= MIC_TAU * pw * pw;
+    }
+    if (offsets[k * 4 + 2] !== 0 && north(sth)) {
+      const ps = precon[sth];
+      e -= ps * ps;
+      if (east(sth)) e -= MIC_TAU * ps * ps;
+    }
+    if (e < MIC_SIGMA * c) e = c;
+    precon[k] = 1 / Math.sqrt(e);
+  }
+  cells.work.precon = precon;
+  return precon;
+}
+
+// Which fluid regions have an undetermined constant - every region with no
+// prescribed pressure in it - and each fluid cell's region, in solve order.
+// Null when no region is singular. Cached with the rest of the operator.
+function regionGauge(grid, cells) {
+  if (cells.work.gauge !== undefined) return cells.work.gauge;
+  const { label, count } = fluidRegions(grid);
+  const singularRegion = new Uint8Array(count);
+  for (let r = 0; r < count; r++) singularRegion[r] = cells.dirichletRegions?.[r] ? 0 : 1;
+  const regionOf = new Int32Array(cells.fluid.length);
+  const sizes = new Float64Array(count);
+  cells.fluid.forEach((k, m) => {
+    regionOf[m] = label[k];
+    sizes[label[k]]++;
+  });
+  cells.work.gauge = singularRegion.some((x) => x === 1)
+    ? { regionOf, singularRegion, sizes, sums: new Float64Array(count), first: new Float64Array(count), seen: new Uint8Array(count), constant: new Uint8Array(count) }
+    : null;
+  return cells.work.gauge;
+}
+
+// z = M^-1 r for the MIC(0) factor: a forward sweep then a backward one.
+function applyMic(grid, cells, precon, r, z, q) {
+  const { stride } = grid;
+  const { fluid, offsets } = cells;
+  const n = fluid.length;
+  for (let m = 0; m < n; m++) {
+    const k = fluid[m];
+    let t = r[k];
+    if (offsets[k * 4] !== 0 && offsets[(k - 1) * 4 + 1] !== 0) t += precon[k - 1] * q[k - 1];
+    if (offsets[k * 4 + 2] !== 0 && offsets[(k - stride) * 4 + 3] !== 0) t += precon[k - stride] * q[k - stride];
+    q[k] = t * precon[k];
+  }
+  for (let m = n - 1; m >= 0; m--) {
+    const k = fluid[m];
+    let t = q[k];
+    if (offsets[k * 4 + 1] !== 0) t += precon[k] * z[k + 1];
+    if (offsets[k * 4 + 3] !== 0) t += precon[k] * z[k + stride];
+    z[k] = t * precon[k];
+  }
+}
+
+function solvePressurePCG(grid, rhs, cells, { residualTol, maxIterations }) {
+  const { h, p } = grid;
+  const h2 = h * h;
+  const { fluid, offsets, counts } = cells;
+  const n = fluid.length;
+  const work = cells.work;
+  work.z ??= new Float64Array(grid.u.length);
+  work.q ??= new Float64Array(grid.u.length);
+  const { r, d, Ad, z, q } = work;
+  const precon = micPreconditioner(grid, cells);
+  const gauge = regionGauge(grid, cells);
+
+  const applyA = (src, dst) => {
+    for (let m = 0; m < n; m++) {
+      const k = fluid[m];
+      const c = counts[k];
+      if (c === 0) { dst[k] = 0; continue; }
+      let sum = 0;
+      const base = k * 4;
+      for (let t = 0; t < 4; t++) {
+        const o = offsets[base + t];
+        if (o !== 0) sum += src[k + o];
+      }
+      dst[k] = (sum - c * src[k]) / h2;
+    }
+  };
+  // THE RESIDUAL is projected exactly as plain CG projects it - one global
+  // constant, and only when the whole problem is a gauge - because the
+  // reported residual must stay the TRUE one. step() turns it into the
+  // continuity error, and an unsolvable region (a source with nowhere to go)
+  // is refused only because its inconsistent part cannot leave the residual.
+  // A first version projected the residual per region: that stripped the
+  // inconsistency out, reported convergence, and let the M6 split-chamber
+  // source run at a loose bound. The M6 test caught it.
+  const projectResidual = (a) => {
+    if (!cells.singular) return;
+    let total = 0;
+    for (let m = 0; m < n; m++) total += a[fluid[m]];
+    const mean = total / n;
+    for (let m = 0; m < n; m++) a[fluid[m]] -= mean;
+  };
+  // THE PRECONDITIONER is projected per region, on its input and its output:
+  // B = P M^-1 P with P removing each singular region's mean. Each fluid region
+  // with no prescribed pressure has its own undetermined constant; plain CG
+  // never excites those directions, but MIC(0) does not map a constant to a
+  // constant, so unprojected it put per-region offsets into every direction -
+  // measured: a two-chamber cavity's region mean pressure drifting to -0.209,
+  // and a sealed pocket that must stay exactly still moving at 2.9e-18 (the
+  // M5 region tests caught both). B is symmetric, positive definite on the
+  // solvable subspace, and gives a sealed pocket an exactly zero correction:
+  // its projected input is zero and MIC never couples disconnected regions.
+  //
+  // A region whose values are all bit-identical AND FINITE is a pure
+  // constant, whose projection is exactly zero - and is set to exactly zero,
+  // because subtracting a computed mean leaves the rounding of sum/size
+  // behind: the sealed pocket then moved at 2.0e-33 where it must not move.
+  //
+  // "And finite" is not decoration. The first version used NaN as its "not
+  // seen yet" marker, so a region full of NaN counted as constant and was set
+  // to ZERO - a NaN pressure silently repaired, the step reporting success.
+  // That is bug A's class exactly; the worker test that injects a NaN hung
+  // because nothing ever failed. A NaN anywhere now takes the ordinary path,
+  // which carries it through to the checks that stop the run.
+  const projectToZeroMean = (a) => {
+    if (gauge === null) return;
+    const { regionOf, singularRegion, sums, sizes, first, seen, constant } = gauge;
+    sums.fill(0);
+    seen.fill(0);
+    constant.fill(1);
+    for (let m = 0; m < n; m++) {
+      const region = regionOf[m];
+      const value = a[fluid[m]];
+      sums[region] += value;
+      if (!Number.isFinite(value)) constant[region] = 0;
+      else if (!seen[region]) {
+        seen[region] = 1;
+        first[region] = value;
+      } else if (value !== first[region]) constant[region] = 0;
+    }
+    for (let m = 0; m < n; m++) {
+      const region = regionOf[m];
+      if (!singularRegion[region]) continue;
+      a[fluid[m]] = constant[region] ? 0 : a[fluid[m]] - sums[region] / sizes[region];
+    }
+  };
+  const dot = (a, b) => {
+    let total = 0;
+    for (let m = 0; m < n; m++) { const k = fluid[m]; total += a[k] * b[k]; }
+    return total;
+  };
+  const maxAbs = (a) => {
+    let mx = 0;
+    let bad = 0;
+    for (let m = 0; m < n; m++) {
+      const v = Math.abs(a[fluid[m]]);
+      if (!Number.isFinite(v)) { bad++; continue; }
+      if (v > mx) mx = v;
+    }
+    return bad > 0 ? NaN : mx;
+  };
+  // z = M^-1 (-h^2 r): the preconditioned residual of the L system.
+  const precondition = () => {
+    for (let m = 0; m < n; m++) { const k = fluid[m]; Ad[k] = -h2 * r[k]; }
+    projectToZeroMean(Ad);
+    applyMic(grid, cells, precon, Ad, z, q);
+    projectToZeroMean(z);
+  };
+
+  if (n === 0) return { iterations: 0, residual: 0, converged: true, fallback: false };
+
+  applyA(p, Ad);
+  for (let m = 0; m < n; m++) { const k = fluid[m]; r[k] = rhs[k] - Ad[k]; }
+  projectResidual(r);
+  let residual = maxAbs(r);
+  let converged = Number.isFinite(residual) && residual < residualTol;
+  let iterations = 0;
+  if (converged) {
+    projectToZeroMean(p);
+    return { iterations, residual, converged, fallback: false };
+  }
+
+  precondition();
+  for (let m = 0; m < n; m++) d[fluid[m]] = z[fluid[m]];
+  // (-h^2 r) . z, the L-system's r.z.
+  let rz = -h2 * dot(r, z);
+  let fallback = false;
+
+  while (!converged && iterations < maxIterations) {
+    if (!Number.isFinite(residual)) break;
+    applyA(d, Ad);
+    const dLd = -h2 * dot(d, Ad);
+    if (!(rz > 0) || !(dLd > 0) || !Number.isFinite(rz) || !Number.isFinite(dLd)) {
+      fallback = true;
+      break;
+    }
+    const alpha = rz / dLd;
+    for (let m = 0; m < n; m++) {
+      const k = fluid[m];
+      p[k] += alpha * d[k];
+      r[k] -= alpha * Ad[k];
+    }
+    projectResidual(r);
+    iterations++;
+    residual = maxAbs(r);
+    if (!Number.isFinite(residual)) break;
+    if (residual < residualTol) { converged = true; break; }
+
+    precondition();
+    const rzNext = -h2 * dot(r, z);
+    const beta = rzNext / rz;
+    for (let m = 0; m < n; m++) { const k = fluid[m]; d[k] = z[k] + beta * d[k]; }
+    rz = rzNext;
+  }
+
+  if (fallback) {
+    // Plain CG from where PCG stopped, with what is left of the budget.
+    const rest = solvePressurePoisson(grid, rhs, cells, { residualTol, maxIterations: maxIterations - iterations });
+    return { ...rest, iterations: iterations + rest.iterations, fallback: true };
+  }
+  projectToZeroMean(p);
+  return { iterations, residual, converged, fallback: false };
+}
+
 // The projected velocity is the intermediate field everywhere, minus the
 // pressure gradient on exactly those faces the Poisson operator treated as
 // degrees of freedom.
@@ -1216,6 +1488,12 @@ export function step(grid, bc, params) {
     sources = null,
     divergenceTol = 1e-8,
     poissonMaxIterations = 5000,
+    // "mic-pcg" (the default): conjugate gradient preconditioned with MIC(0),
+    // see solvePressurePCG and docs/pressure-preconditioner.md - re-validated
+    // claim by claim before it was enabled. "cg": plain conjugate gradient,
+    // the solver every earlier number was produced with, kept untouched as the
+    // reference; tests/fixtures/golden-fields.json still pins it byte for byte.
+    pressureSolver = "mic-pcg",
   } = params;
 
   const plan = boundaryPlanFor(grid, bc);
@@ -1245,7 +1523,11 @@ export function step(grid, bc, params) {
   const regionSums = new Float64Array(regions.count);
   computeRHS(grid, F, G, dt, rho, rhs, cells, regionSums, sourcePlan.mass);
   assertRegionsAreSolvable(cells, regions, regionSums, dt, rho, divergenceTol);
-  const poisson = solvePressurePoisson(grid, rhs, cells, {
+  if (pressureSolver !== "cg" && pressureSolver !== "mic-pcg") {
+    throw new Error(`unknown pressure solver "${pressureSolver}" (expected "cg" or "mic-pcg")`);
+  }
+  const solve = pressureSolver === "mic-pcg" ? solvePressurePCG : solvePressurePoisson;
+  const poisson = solve(grid, rhs, cells, {
     residualTol: (divergenceTol * rho) / dt,
     maxIterations: poissonMaxIterations,
   });
@@ -1317,6 +1599,10 @@ export function step(grid, bc, params) {
     poissonIterations: poisson.iterations,
     poissonResidual: poisson.residual,
     poissonConverged: poisson.converged,
+    // Which solve produced this step's pressure, and whether the
+    // preconditioned one had to fall back to plain CG (never silently).
+    pressureSolver,
+    preconditionerFallback: poisson.fallback === true,
     // How far the field this step produced is from the continuity it was asked
     // for, from the identity above. Named `continuityError` rather than
     // `divergence` because with a mass source running those are two different
@@ -1464,3 +1750,8 @@ export function computeDivergence(grid) {
   if (nonFiniteCells > 0) return { max: NaN, rms: NaN, nonFiniteCells };
   return { max, rms: count > 0 ? Math.sqrt(sumSq / count) : 0, nonFiniteCells: 0 };
 }
+
+// Solver internals, exported for the tests only - the preconditioner is
+// checked directly (symmetric, positive definite, finite) as well as through
+// step(). Nothing in the app imports this.
+export const __testing = { scratchFor, micPreconditioner, applyMic };

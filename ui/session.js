@@ -56,7 +56,10 @@ import { sampleDocument } from "../geometry/document.js";
 import { PassiveTracer } from "../tracer/passiveScalar.js";
 import { PathlineSet } from "../tracer/pathlines.js";
 import { tracerConfigFor } from "../tracer/seeds.js";
-import { step } from "../solver/ns2d.js";
+import { applyVelocityBoundaryConditions, step } from "../solver/ns2d.js";
+import { momentumBudget } from "../physics/momentumBudget.js";
+import { applyFluid, MAX_CELL_RE } from "../materials/fluids.js";
+import { ProjectError, checkProject } from "../io/project.js";
 import { computeStableTimestep } from "../solver/stability.js";
 import { sourcePlanFor } from "../sources/compile.js";
 import { combineSources } from "./brush.js";
@@ -84,6 +87,11 @@ export class SimulationSession {
     this.placedSources = scenario.sources ?? [];
     this.brushSource = null;
     this.#rebuildSources();
+    // Parameter overrides - the Reynolds number an experiment asks for, and in
+    // M12 the fluid's properties. Kept across reset() like boundary edits,
+    // because they describe the run rather than the flow's state; discarded by
+    // load(), because they were chosen for one scenario.
+    this.overrides = {};
     // Created before reset(), which clears their history.
     this.probes = new ProbeSet();
     this.residuals = new ResidualHistory();
@@ -226,6 +234,7 @@ export class SimulationSession {
     // actually be in force. Applying it after would leave cells the edit
     // exposes holding whatever their slots contained.
     this.scenario = buildScenario(this.scenarioId, this.editor.document);
+    this.#applyOverrides();
     this.tracer = new PassiveTracer(this.scenario.grid);
     // Rebuilt rather than carried over: the particles are positions in a
     // domain, and a geometry edit is exactly the case where some of those
@@ -244,10 +253,23 @@ export class SimulationSession {
 
     this.iteration = 0;
     this.simulatedTime = 0;
+    // How fast the field is still changing: max |du|, |dv| over one step,
+    // divided by that step's dt. Measured every step so "steady" is a number
+    // rather than a guess - the M2 cavity benchmark declares steady state the
+    // same way. Infinity until two fields exist to compare.
+    this.changeRate = Infinity;
+    this.previousU = new Float64Array(this.scenario.grid.u.length);
+    this.previousV = new Float64Array(this.scenario.grid.v.length);
     this.lastTimestep = null;
     this.lastSelection = null;
     this.lastStep = null;
+    this.lastStepInputs = null;
+    this.budgetCache = null;
     this.lastTracer = null;
+    // Per-step records for a caller that needs every step's side effects
+    // rather than the end state - the solver worker (M14). Null unless asked
+    // for, so ordinary stepping costs nothing extra.
+    this.stepLog = null;
     this.running = false;
     // The field is now consistent with this mask, and with nothing else.
     this.maskVersionAtReset = this.scenario.grid.maskVersion;
@@ -279,6 +301,13 @@ export class SimulationSession {
   // which is the same machinery that refuses it in a scenario definition.
   setBoundary(side, condition) {
     this.boundaries.setSide(side, condition);
+    return true;
+  }
+
+  // The whole boundary specification at once, validated against the grid
+  // like any edit. Used to restore or mirror a setup; see replaceSpec.
+  setBoundarySpec(spec) {
+    this.boundaries.replaceSpec(spec);
     return true;
   }
 
@@ -344,7 +373,14 @@ export class SimulationSession {
     const { grid, params, timestep } = this.scenario;
     const bc = this.bc;
     const sources = this.sources;
-    const selection = computeStableTimestep(grid, {
+    // Chosen from the field AS THIS STEP WILL ADVECT IT: the velocity with the
+    // boundary pass applied - the same pass step() makes first - on copies, so
+    // the grid step() receives is byte-for-byte what it was. Before this the
+    // choice read the raw field, and a scenario starting from rest chose its
+    // first timestep blind to its own inlet: measured, the field step 1
+    // advected sat at CFL 0.833 on the bends and 0.899 on the jet against a
+    // safety target of 0.4. See docs/inflow-timestep-proposal.md.
+    const selection = computeStableTimestep(this.#advectedField(grid, bc), {
       nu: params.nu,
       safety: timestep.safety,
       previousTimestep: this.lastTimestep,
@@ -362,7 +398,17 @@ export class SimulationSession {
     // params alone and saw no sources at all. The panel then reported a
     // continuity error of 3.20e-1 next to a raw divergence of 7.8e-8, which is
     // the signature of a source that is being displayed and not applied.
-    this.lastStep = step(grid, bc, { ...params, dt: selection.dt, sources });
+    this.previousU.set(grid.u);
+    this.previousV.set(grid.v);
+    const stepParams = { ...params, dt: selection.dt, sources };
+    this.lastStep = step(grid, bc, stepParams);
+    // What this step was given, kept for the momentum budget. A boundary edit
+    // or a brush stroke between this step and the next paint would otherwise
+    // have the budget describe a step with a different right-hand side from
+    // the one that ran - and it would not close. Both are frozen or rebuilt
+    // on change rather than mutated, so holding the references is enough.
+    this.lastStepInputs = { bc, params: stepParams };
+    this.changeRate = this.#measureChangeRate(grid, selection.dt);
     this.iteration++;
     this.simulatedTime += selection.dt;
     this.residuals.record(this.iteration, this.lastStep);
@@ -377,6 +423,13 @@ export class SimulationSession {
     // save by making it conditional. Like the tracer, it reads the field the
     // solver just produced and writes nothing back.
     this.pathlines.advance(grid, selection.dt);
+    if (this.stepLog !== null) {
+      this.stepLog.push({
+        iteration: this.iteration,
+        step: this.lastStep,
+        readings: this.probes.probes.map((probe) => [probe.id, probe.history.latest()]),
+      });
+    }
     this.lastTracer = this.tracer.advect(grid, bc, selection.dt, {
       inject: this.tracerConfig.inject,
       // The dye a source carries is read here and nowhere below the display
@@ -384,6 +437,284 @@ export class SimulationSession {
       sources,
     });
     return this.lastStep;
+  }
+
+  // Runs this scenario at a different Reynolds number, by changing the
+  // viscosity through the scenario's own declared reference scale:
+  // nu = U * L / Re. Nothing else moves - the geometry, the boundary
+  // conditions and the reference speed are the scenario's - so the run is the
+  // same flow at a different Re, which is what a Reynolds sweep means.
+  //
+  // Applied through reset(), because a new viscosity is a different problem
+  // and the field from the old one is not a valid state of it. Passing null
+  // returns to the scenario's own value.
+  setReynolds(Re) {
+    if (Re !== null && !(Number.isFinite(Re) && Re > 0)) {
+      throw new RangeError(`a Reynolds number must be positive and finite, got ${Re}`);
+    }
+    // nu = U*L/Re is only the requested Re when U does not itself depend on nu.
+    // In a pressure-driven flow it does (U = dp*w^2/(12*mu*L)), so the formula
+    // would land somewhere else entirely - refused rather than mislabelled.
+    if (Re !== null && this.scenario.reference.speedSetByViscosity) {
+      throw new RangeError(
+        `"${this.scenarioId}" has no imposed speed - its ${this.scenario.reference.speed} ` +
+        `changes with the viscosity - so its Reynolds number cannot be set by the viscosity alone`
+      );
+    }
+    if (Re === null) delete this.overrides.Re;
+    else {
+      this.overrides.Re = Re;
+      // A Reynolds number without a fluid is dimensionless: it replaces a
+      // chosen material rather than stacking a second viscosity on top of it.
+      delete this.overrides.material;
+    }
+    this.running = false;
+    this.reset();
+    return true;
+  }
+
+  // Fills this scenario's apparatus with a real fluid - see
+  // materials/fluids.js for the physical scale and what rho and mu each do.
+  // Refused, with nothing changed, when the grid cannot resolve the result.
+  // Passing null returns to the scenario's own dimensionless fluid. Returns
+  // the session, so a caller can chain a run onto it.
+  setMaterial(fluid) {
+    if (fluid !== null) {
+      const outcome = applyFluid(this.#fluidDefaults(), fluid);
+      if (!outcome.resolvable) {
+        throw new RangeError(
+          `${fluid.name ?? "this fluid"} would run "${this.scenarioId}" at Re ${outcome.Re.toPrecision(3)}, ` +
+          `a cell Reynolds number of ${outcome.cellRe.toPrecision(3)} on this grid - past ${MAX_CELL_RE}, ` +
+          `finer than anything here has been checked at. Refused rather than run unresolved.`
+        );
+      }
+    }
+    if (fluid === null) delete this.overrides.material;
+    else {
+      this.overrides.material = { ...fluid };
+      delete this.overrides.Re;
+    }
+    this.running = false;
+    this.reset();
+    return this;
+  }
+
+  // Loads a saved project (io/project.js) - the whole setup, from rest.
+  //
+  // Validated by BUILDING it: the project is first applied to a scratch
+  // session, through the same operations an edit in the app goes through, so
+  // a geometry, boundary, source or fluid that would be refused in the app is
+  // refused here with the same message. Only if every part succeeds is it
+  // applied to this session, which a refusal therefore leaves exactly as it
+  // was - not even reset. Returns the project's saved view settings for the
+  // app to apply; the session has no view.
+  importProject(project) {
+    checkProject(project);
+    const attempt = (session) => {
+      try {
+        session.#applyProject(project);
+      } catch (error) {
+        if (error instanceof ProjectError) throw error;
+        throw new ProjectError(`the project could not be loaded: ${error.message}`);
+      }
+    };
+    attempt(new SimulationSession(project.scenario));
+    attempt(this);
+    return project.view ?? null;
+  }
+
+  #applyProject(project) {
+    this.load(project.scenario);
+    for (const operation of project.geometry.operations) this.editor.append(operation);
+    // One rebuild for the whole document rather than one per shape.
+    this.reset();
+    this.setBoundarySpec(project.boundaries);
+    this.placedSources = [];
+    this.#rebuildSources();
+    for (const source of project.sources) this.addSource(source);
+    if (project.fluid !== null) this.setMaterial(project.fluid);
+    else if (project.Re !== null) this.setReynolds(project.Re);
+    for (const { x, y } of project.probes) this.addProbe(x, y);
+    this.reset();
+  }
+
+  // The scenario as BUILT, before any override - what a fluid is applied to.
+  #fluidDefaults() {
+    const built = buildScenario(this.scenarioId, this.editor.document);
+    return {
+      nu: built.params.nu,
+      rho: built.params.rho,
+      U: built.reference.U,
+      L: built.reference.L,
+      h: built.grid.h,
+      speedSetByViscosity: Boolean(built.reference.speedSetByViscosity),
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // M14: handing a running flow between threads
+  // ---------------------------------------------------------------------------
+  //
+  // Everything that changes when the solver steps - the fields, the dye, the
+  // pathlines and their random generator, the clocks, the last step's report -
+  // and nothing that describes the SETUP, which both sides already hold (a
+  // worker is given the setup as a project, io/project.js, and mid-run edits as
+  // the same calls the app makes). Plain data and typed arrays, so it survives
+  // postMessage. Copies, so the two sides never share a buffer.
+  // `copy: false` hands over the pathlines and step report by reference - for
+  // a caller that is about to postMessage the result, which clones anyway.
+  // The trails are 300 parcels of objects, and cloning them three times per
+  // batch was most of the worker's 10.6 ms handoff.
+  captureState({ copy = true } = {}) {
+    const { grid, tracer } = this;
+    const own = copy ? structuredClone : (value) => value;
+    return {
+      u: grid.u.slice(),
+      v: grid.v.slice(),
+      p: grid.p.slice(),
+      previousU: this.previousU.slice(),
+      previousV: this.previousV.slice(),
+      tracer: {
+        c: tracer.c.slice(),
+        steps: tracer.steps,
+        lastCFL: tracer.lastCFL,
+        lastSubsteps: tracer.lastSubsteps,
+        lastInjected: tracer.lastInjected,
+      },
+      pathlines: own(this.pathlines.captureState()),
+      iteration: this.iteration,
+      simulatedTime: this.simulatedTime,
+      lastTimestep: this.lastTimestep,
+      lastSelection: own(this.lastSelection),
+      lastStep: own(this.lastStep),
+      lastTracer: own(this.lastTracer),
+      changeRate: this.changeRate,
+      lastStepInputs: own(this.lastStepInputs),
+    };
+  }
+
+  // The inverse. `tracer: false` leaves the dye alone - used when the dye was
+  // changed here while the state being installed was computed elsewhere.
+  installState(state, { tracer = true, owned = false } = {}) {
+    const { grid } = this;
+    if (state.u.length !== grid.u.length) {
+      throw new RangeError(`a ${state.u.length}-entry state does not fit this ${grid.u.length}-entry grid`);
+    }
+    grid.u.set(state.u);
+    grid.v.set(state.v);
+    grid.p.set(state.p);
+    this.previousU.set(state.previousU);
+    this.previousV.set(state.previousV);
+    if (tracer) {
+      this.tracer.c.set(state.tracer.c);
+      this.tracer.steps = state.tracer.steps;
+      this.tracer.lastCFL = state.tracer.lastCFL;
+      this.tracer.lastSubsteps = state.tracer.lastSubsteps;
+      this.tracer.lastInjected = state.tracer.lastInjected;
+    }
+    this.pathlines.installState(owned ? state.pathlines : structuredClone(state.pathlines));
+    this.iteration = state.iteration;
+    this.simulatedTime = state.simulatedTime;
+    this.lastTimestep = state.lastTimestep;
+    this.lastSelection = state.lastSelection;
+    this.lastStep = state.lastStep;
+    this.lastTracer = state.lastTracer;
+    this.changeRate = state.changeRate;
+    this.lastStepInputs = state.lastStepInputs;
+    this.budgetCache = null;
+  }
+
+  // Replays what each remote step recorded - the residual and every probe's
+  // sample - so the charts here hold one point per step exactly as if the
+  // steps had run here. A probe added here since has no reading in them and
+  // simply starts with the next batch; one removed is skipped.
+  applyStepRecords(records) {
+    for (const record of records) {
+      this.residuals.record(record.iteration, record.step);
+      for (const [id, latest] of record.readings) {
+        const probe = this.probes.probeById(id);
+        if (probe !== null && latest !== null) probe.history.push(latest.time, latest.sample);
+      }
+    }
+  }
+
+  // The momentum budget of the last step, term by term - what moved the
+  // fluid, measured with the solver's own stencils. See
+  // physics/momentumBudget.js. Null before any step. Computed on demand and
+  // kept until the next step, because the display asks every frame and the
+  // answer only changes when the field does.
+  momentumBudget() {
+    if (this.lastStepInputs === null) return null;
+    if (this.budgetCache?.iteration === this.iteration) return this.budgetCache.budget;
+    const { bc, params } = this.lastStepInputs;
+    const budget = momentumBudget(this.grid, bc, params, this.previousU, this.previousV);
+    this.budgetCache = { iteration: this.iteration, budget };
+    return budget;
+  }
+
+  // The grid's geometry with the velocity the next step will advect: copies of
+  // u and v with the boundary pass applied. Only what the timestep selector
+  // reads; the copies are reused from step to step.
+  #advectedField(grid, bc) {
+    if (this.advectedU?.length !== grid.u.length) {
+      this.advectedU = new Float64Array(grid.u.length);
+      this.advectedV = new Float64Array(grid.v.length);
+    }
+    this.advectedU.set(grid.u);
+    this.advectedV.set(grid.v);
+    applyVelocityBoundaryConditions(grid, bc, this.advectedU, this.advectedV);
+    return {
+      nx: grid.nx,
+      ny: grid.ny,
+      h: grid.h,
+      stride: grid.stride,
+      solid: grid.solid,
+      u: this.advectedU,
+      v: this.advectedV,
+    };
+  }
+
+  #applyOverrides() {
+    const scenario = this.scenario;
+    scenario.defaultRe = scenario.Re;
+    scenario.material = null;
+    const fluid = this.overrides.material;
+    if (fluid !== undefined) {
+      const outcome = applyFluid({
+        nu: scenario.params.nu,
+        rho: scenario.params.rho,
+        U: scenario.reference.U,
+        L: scenario.reference.L,
+        h: scenario.grid.h,
+        speedSetByViscosity: Boolean(scenario.reference.speedSetByViscosity),
+      }, fluid);
+      scenario.params = { ...scenario.params, ...outcome.params };
+      scenario.Re = outcome.Re;
+      scenario.reference = { ...scenario.reference, U: outcome.speed };
+      scenario.material = { fluid: { ...fluid }, ...outcome };
+      return;
+    }
+    const Re = this.overrides.Re;
+    if (Re === undefined) return;
+    const { U, L } = scenario.reference;
+    scenario.params = { ...scenario.params, nu: (U * L) / Re };
+    scenario.Re = Re;
+  }
+
+  #measureChangeRate(grid, dt) {
+    const { u, v } = grid;
+    const pu = this.previousU;
+    const pv = this.previousV;
+    let worst = 0;
+    for (let k = 0; k < u.length; k++) {
+      const du = Math.abs(u[k] - pu[k]);
+      const dv = Math.abs(v[k] - pv[k]);
+      // A NaN anywhere makes the rate NaN rather than being skipped by a bare
+      // comparison - a broken field is not a steady one.
+      if (!(du <= worst)) worst = du;
+      if (!(dv <= worst)) worst = dv;
+    }
+    return worst / dt;
   }
 
   // Switching scenario keeps nothing: a document drawn against one domain has
@@ -401,6 +732,7 @@ export class SimulationSession {
     // Sources and probes describe places in a particular domain, so a scenario
     // change discards them exactly as it discards a geometry document.
     this.probes.clear();
+    this.overrides = {};
     this.placedSources = scenario.sources ?? [];
     this.brushSource = null;
     this.#rebuildSources();

@@ -12,7 +12,13 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { FIXTURE_CASES, measureFixtureCase, runFixtureCase } from "../tests/support/boundaryFixtures.js";
 
-const OUT = new URL("../tests/fixtures/golden-fields.json", import.meta.url).pathname;
+// `--solver mic-pcg` records the preconditioned pressure solve into its own
+// file; the default record stays the reference "cg" solve.
+const SOLVER = process.argv.includes("--solver") ? process.argv[process.argv.indexOf("--solver") + 1] : "cg";
+const OUT = new URL(
+  SOLVER === "cg" ? "../tests/fixtures/golden-fields.json" : `../tests/fixtures/golden-fields-${SOLVER}.json`,
+  import.meta.url,
+).pathname;
 
 // A hash mismatch says the field changed but not where. This prints the first
 // cells that differ against the current code, so a failure is diagnosable
@@ -27,7 +33,7 @@ function describe(caseId) {
     process.exitCode = 1;
     return;
   }
-  const grid = runFixtureCase(entry);
+  const grid = runFixtureCase(entry, { pressureSolver: SOLVER });
   const line = (label, values) =>
     `${label.padEnd(18)} ${values.map((v) => (Number.isFinite(v) ? v.toFixed(6).padStart(11) : "        NaN")).join(" ")}`;
 
@@ -77,7 +83,7 @@ async function main() {
       }
       continue;
     }
-    const measured = measureFixtureCase(entry);
+    const measured = measureFixtureCase(entry, { pressureSolver: SOLVER });
     cases[entry.id] = measured;
     process.stderr.write(
       `${entry.id.padEnd(28)} u=${measured.u.slice(0, 16)} ` +
@@ -85,7 +91,16 @@ async function main() {
     );
   }
 
-  const record = {
+  const record = SOLVER !== "cg" ? {
+    note:
+      `Golden fields for the "${SOLVER}" pressure solve, the same fixtures as ` +
+      "golden-fields.json. That file keeps pinning the reference CG solve; this " +
+      "one pins the preconditioned solve the app runs. A mismatch means a change " +
+      "moved the physics; regenerate only when that is intended and say so.",
+    solver: SOLVER,
+    generatedAt: new Date().toISOString().replace("T", " ").replace(/\..*/, " UTC"),
+    cases,
+  } : {
     note:
       "Golden boundary-condition fields. Generated BEFORE the M4 refactor, from " +
       "the solver as it stood at that commit. A mismatch means a change moved the " +

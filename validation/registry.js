@@ -101,7 +101,7 @@ export const REFERENCES = {
       "per table. The check found one wrong digit in the previous recalled " +
       "transcription (Re=1000, x=0.9063: -0.51550 against a true -0.51500) which " +
       "was setting the reported Re=1000 error. One published point is excluded " +
-      "as unreliable - see tests/support/ghia.js EXCLUDED_POINTS.",
+      "as unreliable - see validation/ghia.js EXCLUDED_POINTS.",
   },
 
   analyticalDiffusion: {

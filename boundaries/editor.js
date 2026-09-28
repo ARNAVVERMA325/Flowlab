@@ -151,6 +151,14 @@ export class BoundaryEditor {
     return this.#commit(next);
   }
 
+  // Replaces the whole specification - every side and any drawn surfaces - as
+  // ONE recorded edit. For restoring a saved setup (M13) and for mirroring
+  // another editor's current state (M14), where replaying that editor's own
+  // history would record a different one.
+  replaceSpec(spec) {
+    return this.#commit(copySpec(spec));
+  }
+
   undo() {
     if (!this.canUndo) return false;
     this.future.push(this.spec);

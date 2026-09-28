@@ -114,6 +114,12 @@ describe("browser", { skip }, () => {
         return null;
       });
       assert.notEqual(injected, null);
+      // Long enough for many solver batches to land. With the solver in a
+      // worker, a failure that did not also stop the worker was overwritten by
+      // its next batch - and read immediately, this check passed on timing.
+      await page.waitForTimeout(500);
+      assert.equal(await page.evaluate(() => window.__flowlab.stepper?.active ?? false), false,
+        "a failed run stops the solver worker too");
 
       const { panel } = await readState(page);
       assert.equal(panel.status, "FAILED");
@@ -1388,7 +1394,7 @@ describe("browser", { skip }, () => {
         [...document.querySelectorAll("#mode .modetile")].map((tile) => tile.dataset.mode));
       assert.deepEqual(
         modes,
-        ["velocity", "pressure", "vorticity", "shear", "q", "continuity", "dye"]
+        ["velocity", "pressure", "vorticity", "shear", "q", "continuity", "dye", "term"]
       );
       for (const mode of modes) {
         await chooseMode(page, mode);
@@ -1405,5 +1411,447 @@ describe("browser", { skip }, () => {
       assert.equal(after.solver.iteration, before.solver.iteration);
       assert.equal(after.panel.time, before.panel.time);
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Experiments (M10)
+  // -------------------------------------------------------------------------
+
+  test("choosing an experiment describes it and touches nothing else", async () => {
+    await withApp(async ({ page }) => {
+      const before = await readState(page);
+      const scenario = await page.inputValue("#scenario");
+      await page.selectOption("#experiment", "sweep");
+      await page.waitForTimeout(150);
+      const question = await page.textContent("#expquestion");
+      assert.match(question, /lid drags fluid/);
+      assert.match(await page.textContent("#expreference"), /ghia1982/);
+      assert.equal(await page.isDisabled("#expstop"), true, "nothing is running to stop");
+      const after = await readState(page);
+      assert.equal(after.solver.iteration, before.solver.iteration);
+      assert.equal(await page.inputValue("#scenario"), scenario, "describing loads nothing");
+    });
+  });
+
+  test("the pipe experiment runs from rest to steady and reports agreement", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#experiment", "pipe");
+      await page.click("#expstart");
+      assert.equal(await page.isDisabled("#expstart"), true, "one experiment at a time");
+      await page.waitForFunction(() => window.__flowlab.experiment?.state !== "running", null, { timeout: 120000 });
+      assert.equal(await page.evaluate(() => window.__flowlab.experiment.state), "finished");
+      assert.equal(await page.inputValue("#scenario"), "pressure-channel", "the app shows the flow it measured");
+      const verdicts = await page.$$eval("#expresults .expitem .expv span:last-child", (spans) => spans.map((s) => s.textContent));
+      assert.deepEqual(verdicts, ["agrees", "agrees", "agrees"]);
+      assert.match(await page.textContent("#expresults .runs"), /steady \(rate/);
+      assert.doesNotMatch(await page.textContent("#expresults .runs"), /NOT steady/);
+      assert.match(await page.textContent("#expsummary"), /outputs/);
+      assert.equal(await page.isDisabled("#expstop"), true);
+      assert.equal(await page.isDisabled("#expstart"), false);
+      // The numbers in the panel are the runner's, not recomputed by the page.
+      const measured = await page.evaluate(() => window.__flowlab.experiment.results[0].measured.meanU);
+      const shown = await page.textContent("#expresults .expitem .expv span.num");
+      assert.equal(shown, measured.toPrecision(4));
+    });
+  });
+
+  test("a sweep run is at the Re it says, the title says so, and Stop ends it", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#experiment", "sweep");
+      await page.click("#expstart");
+      await page.waitForFunction(() => window.__flowlab.session.iteration > 20, null, { timeout: 60000 });
+      const { Re, nu, U, L } = await page.evaluate(() => {
+        const s = window.__flowlab.session.scenario;
+        return { Re: s.Re, nu: s.params.nu, U: s.reference.U, L: s.reference.L };
+      });
+      assert.equal(Re, 100);
+      assert.ok(Math.abs((U * L) / nu - 100) < 1e-9, "the solver's viscosity is Re 100's");
+      assert.match(await page.textContent("#scenariotitle"), /running at Re 100/);
+      assert.match(await page.textContent("#expstatus"), /run 1 of 3: Re 100/);
+      await page.click("#expstop");
+      await page.waitForTimeout(150);
+      assert.equal(await page.evaluate(() => window.__flowlab.experiment.state), "stopped");
+      assert.equal((await readState(page)).panel.status, "PAUSED", "Stop pauses the run");
+      assert.match(await page.textContent("#expstatus"), /partial runs are not reported/);
+      assert.equal(await page.textContent("#expresults"), "", "nothing concluded from a stopped run");
+    });
+  });
+
+  test("a person's own action interrupts an experiment instead of being measured by it", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#experiment", "sweep");
+      await page.click("#expstart");
+      await page.waitForFunction(() => window.__flowlab.session.iteration > 20, null, { timeout: 60000 });
+      await page.click("#reset");
+      await page.waitForTimeout(150);
+      assert.equal(await page.evaluate(() => window.__flowlab.experiment.state), "stopped");
+      assert.match(await page.textContent("#expstatus"), /stopped: .*Nothing is reported/);
+      // Reset returns to the scenario as defined, so the Re the experiment set
+      // does not linger - and the title and the solver agree on that.
+      assert.equal(await page.evaluate(() => window.__flowlab.session.scenario.Re), 1000);
+      assert.equal(await page.evaluate(() => window.__flowlab.session.scenario.params.nu), 1 / 1000);
+      assert.doesNotMatch(await page.textContent("#scenariotitle"), /running at Re/);
+      // And a later frame does not overwrite the reason with a generic one.
+      await runForSteps(page, 10);
+      assert.match(await page.textContent("#expstatus"), /Reset was pressed/);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Equation explorer (M11)
+  // -------------------------------------------------------------------------
+
+  test("clicking a term shows where it acts, from a budget that closes, and touches nothing", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(200);
+      await runForSteps(page, 40);
+      const checksum = () => page.evaluate(() => {
+        const c = document.querySelector("#field");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 53) sum = (sum * 31 + d[i]) >>> 0;
+        return sum;
+      });
+      const before = await readState(page);
+      const pictures = new Map();
+      for (const term of ["unsteady", "advection", "pressure", "viscous", "source"]) {
+        await page.click(`#equation .eqterm[data-term="${term}"]`);
+        await page.waitForTimeout(120);
+        assert.equal(await page.evaluate(() => window.__flowlab.mode), "term");
+        assert.equal(await page.getAttribute(`#equation .eqterm[data-term="${term}"]`, "aria-pressed"), "true");
+        assert.equal(await page.$$eval("#equation .eqterm.on", (nodes) => nodes.length), 1, "one term at a time");
+        assert.match(await page.textContent("#legendtitle"), /share taken by/);
+        assert.match(await page.textContent("#eqwhere"), /dominat/);
+        const closure = await page.textContent("#eqclosure");
+        const relative = Number(closure.match(/to (\S+) of the largest term/)[1]);
+        assert.ok(relative < 1e-11, `the budget the page shows closes: ${closure}`);
+        assert.equal(await page.evaluate(() => document.querySelector("#eqclosure").classList.contains("bad")), false);
+        pictures.set(term, await checksum());
+      }
+      assert.equal(new Set(pictures.values()).size, 5, "each term paints its own picture");
+      assert.match(await page.textContent("#eqexplain"), /outside the equation/);
+      assert.match(await page.textContent("#eqwhere"), /dominates nowhere/, "no source in this flow");
+      const after = await readState(page);
+      assert.equal(after.solver.iteration, before.solver.iteration, "choosing a term does not step");
+      assert.equal(after.panel.time, before.panel.time);
+    });
+  });
+
+  test("the continuity constraint opens the continuity view, and the tile defaults to advection", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      await runForSteps(page, 10);
+      await page.click("#eqconstraint");
+      await page.waitForTimeout(120);
+      assert.equal(await page.evaluate(() => window.__flowlab.mode), "continuity");
+      assert.equal(await page.$$eval("#equation .eqterm.on", (nodes) => nodes.length), 0);
+      assert.match(await page.textContent("#eqwhere"), /Click a term/);
+      await chooseMode(page, "term");
+      assert.equal(await page.getAttribute('#equation .eqterm[data-term="advection"]', "aria-pressed"), "true");
+    });
+  });
+
+  test("before the first step the explorer says there is no budget rather than drawing one", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "jet");
+      await page.waitForTimeout(200);
+      await page.click('#equation .eqterm[data-term="viscous"]');
+      await page.waitForTimeout(120);
+      assert.match(await page.textContent("#eqwhere"), /Take at least one step/);
+      assert.equal(await page.textContent("#legendtitle"), "-");
+      assert.match(await page.textContent("#viewnote"), /not available/);
+      await runForSteps(page, 3);
+      assert.match(await page.textContent("#legendtitle"), /share taken by viscous/);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Fluid (M12)
+  // -------------------------------------------------------------------------
+
+  test("a chosen fluid reaches the solver, a refused one changes nothing, and custom works", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      const state = () => page.evaluate(() => {
+        const s = window.__flowlab.session.scenario;
+        return { fluid: s.material?.fluid.id ?? null, Re: s.Re, nu: s.params.nu, rho: s.params.rho };
+      });
+
+      await page.selectOption("#fluid", "air");
+      await page.click("#fluidapply");
+      await page.waitForTimeout(150);
+      let now = await state();
+      assert.equal(now.fluid, "air");
+      assert.equal(now.rho, 1.204);
+      assert.ok(Math.abs(now.Re - 66.2) < 0.1, `Re ${now.Re}`);
+      assert.match(await page.textContent("#scenariotitle"), /Air.*Re 66\.2/);
+      assert.match(await page.textContent("#fluidre"), /^66\.2/);
+      assert.match(await page.textContent("#fluidsize"), /10\.0\d* cm/);
+      await runForSteps(page, 10);
+      const air = await state();
+
+      await page.selectOption("#fluid", "mercury");
+      await page.click("#fluidapply");
+      await page.waitForTimeout(150);
+      assert.match(await page.textContent("#fluidstatus"), /Refused: .*cell Reynolds number/);
+      assert.equal(await page.evaluate(() => document.querySelector("#fluidstatus").classList.contains("bad")), true);
+      assert.deepEqual(await state(), air, "a refused fluid changes nothing");
+      assert.ok(await page.evaluate(() => window.__flowlab.session.iteration) >= 10, "and does not even reset the run");
+
+      assert.equal(await page.isHidden("#fluidcustom"), true, "the custom inputs only appear for a custom fluid");
+      await page.selectOption("#fluid", "custom");
+      assert.equal(await page.isHidden("#fluidcustom"), false);
+      await page.fill("#fluidrho", "998.2");
+      await page.fill("#fluidmu", "0.001002");
+      await page.click("#fluidapply");
+      await page.waitForTimeout(150);
+      now = await state();
+      assert.equal(now.fluid, "custom");
+      assert.ok(Math.abs(now.Re - 1000) < 1e-6, "water's properties typed in give the shipped Re");
+
+      await page.selectOption("#fluid", "scenario");
+      await page.click("#fluidapply");
+      await page.waitForTimeout(150);
+      now = await state();
+      assert.deepEqual([now.fluid, now.Re, now.rho], [null, 1000, 1]);
+      assert.equal(await page.isHidden("#fluidcustom"), true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Project and export (M13)
+  // -------------------------------------------------------------------------
+
+  test("a saved project loads back with its scenario, fluid and view", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cylinder");
+      await page.waitForTimeout(200);
+      await page.selectOption("#fluid", "air");
+      await page.click("#fluidapply");
+      await chooseMode(page, "vorticity");
+      await page.check("#showstreamlines");
+      const saved = page.waitForEvent("download");
+      await page.click("#projsave");
+      const download = await saved;
+      assert.equal(download.suggestedFilename(), "flowlab-cylinder.json");
+      const text = await page.evaluate(() => window.__flowlab.lastDownload.content);
+      const project = JSON.parse(text);
+      assert.equal(project.format, "flowlab-project");
+      assert.equal(project.fluid.id, "air");
+
+      // Somewhere else entirely, then back through the file input.
+      await page.selectOption("#scenario", "jet");
+      await chooseMode(page, "pressure");
+      await page.uncheck("#showstreamlines");
+      await page.setInputFiles("#projfile", { name: "saved.json", mimeType: "application/json", buffer: Buffer.from(text) });
+      await page.waitForFunction(() => window.__flowlab.session.scenarioId === "cylinder");
+      await page.waitForTimeout(150);
+      assert.equal(await page.inputValue("#scenario"), "cylinder");
+      assert.equal(await page.evaluate(() => window.__flowlab.session.scenario.material.fluid.id), "air");
+      assert.equal(await page.evaluate(() => window.__flowlab.mode), "vorticity");
+      assert.equal(await page.isChecked("#showstreamlines"), true);
+      assert.equal(await page.inputValue("#fluid"), "air");
+      assert.match(await page.textContent("#projstatus"), /loaded saved\.json/);
+    });
+  });
+
+  test("a bad project file is refused with its reason and changes nothing", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      await runForSteps(page, 5);
+      const before = await page.evaluate(() => window.__flowlab.session.iteration);
+      await page.setInputFiles("#projfile", { name: "broken.json", mimeType: "application/json", buffer: Buffer.from("{ not json") });
+      await page.waitForFunction(() => document.querySelector("#projstatus").classList.contains("bad"));
+      assert.match(await page.textContent("#projstatus"), /broken\.json was not loaded: not valid JSON/);
+      assert.equal(await page.evaluate(() => window.__flowlab.session.iteration), before);
+      assert.equal(await page.inputValue("#scenario"), "cavity");
+    });
+  });
+
+  test("every export offers the file it names, with its data", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      await runForSteps(page, 8);
+      const grab = async (button) => {
+        const offered = page.waitForEvent("download");
+        await page.click(button);
+        const download = await offered;
+        await page.waitForTimeout(50);
+        return { name: download.suggestedFilename(), info: await page.evaluate(() => window.__flowlab.lastDownload) };
+      };
+      const iteration = await page.evaluate(() => window.__flowlab.session.iteration);
+
+      const field = await grab("#exportfield");
+      assert.equal(field.name, `flowlab-cavity-step${iteration}-field.csv`);
+      assert.match(field.info.content, /\ni,j,x,y,solid,u,v,speed,p,vorticity\n/);
+      assert.equal(field.info.content.trim().split("\n").filter((l) => !l.startsWith("#")).length, 1 + 64 * 64);
+
+      const residuals = await grab("#exportresiduals");
+      assert.match(residuals.info.content, /step,continuity_error,poisson_residual/);
+      const probes = await grab("#exportprobes");
+      assert.match(probes.info.content, /no probes pinned/);
+
+      const image = await grab("#exportimage");
+      assert.equal(image.info.type, "image/png");
+      const canvas = await page.evaluate(() => [document.querySelector("#field").width, document.querySelector("#field").height]);
+      assert.deepEqual([image.info.width, image.info.height], [canvas[0], canvas[1] + 64], "the field plus its legend band");
+      const charts = await grab("#exportcharts");
+      assert.equal(charts.info.type, "image/png");
+      assert.equal(charts.info.height, 520);
+
+      await page.click("#exportexperiment");
+      assert.match(await page.textContent("#projstatus"), /No finished experiment/);
+      assert.equal(await page.evaluate(() => window.__flowlab.session.iteration), iteration, "exporting never steps");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Performance (M14)
+  // -------------------------------------------------------------------------
+
+  test("with the solver in a worker the page keeps drawing, and the flow is the same bytes", async () => {
+    // The same cylinder run twice - once in the worker (the default), once on
+    // this thread - measuring the gaps between animation frames while it runs.
+    const measure = async (query) => {
+      const app = await openApp(browser, server.url + query);
+      const { page } = app;
+      try {
+        await page.selectOption("#scenario", "cylinder");
+        await page.waitForTimeout(300);
+        await page.evaluate(() => {
+          window.__gaps = [];
+          let last = performance.now();
+          const loop = () => {
+            const now = performance.now();
+            window.__gaps.push(now - last);
+            last = now;
+            if (!window.__stopGaps) requestAnimationFrame(loop);
+          };
+          requestAnimationFrame(loop);
+        });
+        await page.click("#run");
+        await page.waitForFunction(() => window.__flowlab.session.iteration >= 20, null, { timeout: 60000 });
+        await page.click("#pause");
+        await page.waitForTimeout(200);
+        const result = await page.evaluate(async () => {
+          window.__stopGaps = true;
+          const gaps = window.__gaps.slice(5).sort((a, b) => a - b);
+          const h = window.__flowlab;
+          // Stepped here, directly, to the same step count.
+          const { SimulationSession } = await import("/ui/session.js");
+          const fresh = new SimulationSession("cylinder");
+          for (let k = 0; k < h.session.iteration; k++) fresh.advance();
+          const same = (a, b) => a.length === b.length && a.every((x, k) => Object.is(x, b[k]));
+          return {
+            p95: gaps[Math.floor(gaps.length * 0.95)],
+            where: document.querySelector("#computewhere").textContent,
+            identical: ["u", "v", "p"].every((f) => same(h.session.grid[f], fresh.grid[f])) && same(h.session.tracer.c, fresh.tracer.c),
+            residuals: h.session.residuals.length,
+            iteration: h.session.iteration,
+          };
+        });
+        app.assertNoErrors(query || "worker");
+        return result;
+      } finally {
+        await page.close();
+      }
+    };
+    const worker = await measure("");
+    const main = await measure("?compute=main");
+    assert.equal(worker.where, "CPU, Web Worker");
+    assert.equal(main.where, "main thread (requested)");
+    assert.ok(worker.identical, "the worker's flow is byte-identical to stepping on this thread");
+    assert.ok(main.identical);
+    assert.equal(worker.residuals, worker.iteration, "one chart point per step, from the worker's records");
+    assert.ok(worker.p95 < main.p95 / 2,
+      `frames keep coming: p95 gap ${worker.p95.toFixed(0)} ms with the worker, ${main.p95.toFixed(0)} ms without`);
+  });
+
+  test("the display resolution adapts, and the simulation's never does", async () => {
+    await withApp(async ({ page }) => {
+      await page.selectOption("#scenario", "cavity");
+      await page.waitForTimeout(200);
+      const before = await page.evaluate(() => {
+        const h = window.__flowlab;
+        h.draw();
+        return { sub: h.renderer.lastSubsample, nx: h.session.grid.nx };
+      });
+      const after = await page.evaluate(() => {
+        const h = window.__flowlab;
+        h.renderer.pixelBudget = 15000;
+        h.draw();
+        return { sub: h.renderer.lastSubsample, nx: h.session.grid.nx, buffer: h.renderer.buffer.width };
+      });
+      assert.ok(after.sub < before.sub, `${before.sub} -> ${after.sub} px/cell`);
+      assert.equal(after.buffer, after.nx * after.sub);
+      assert.equal(after.nx, before.nx, "the grid is untouched");
+      await runForSteps(page, 5);
+      assert.match(await page.textContent("#perf"), /-|render [\d.]+ ms at \d+ px\/cell/);
+    });
+  });
+
+  test("experiments run in the worker: the same results, and the page keeps drawing", async () => {
+    // The pipe experiment, through the worker, against the same experiment
+    // run directly on the page.
+    await withApp(async ({ page }) => {
+      await page.selectOption("#experiment", "pipe");
+      await page.click("#expstart");
+      await page.waitForFunction(() => window.__flowlab.experiment?.state !== "running", null, { timeout: 120000 });
+      assert.equal(await page.textContent("#computewhere"), "CPU, Web Worker");
+      const same = await page.evaluate(async () => {
+        const { SimulationSession } = await import("/ui/session.js");
+        const { ExperimentRunner } = await import("/experiments/runner.js");
+        const { experimentById } = await import("/experiments/definitions.js");
+        const runner = new ExperimentRunner(experimentById("pipe"), new SimulationSession("cavity")).start();
+        while (runner.state === "running") { runner.session.advance(); runner.afterStep(); }
+        const shown = window.__flowlab.experiment;
+        return JSON.stringify(runner.results) === JSON.stringify(shown.results) &&
+          JSON.stringify(runner.conclusion) === JSON.stringify(shown.conclusion);
+      });
+      assert.ok(same, "the worker's results are the direct run's, exactly");
+    });
+
+    // Frame gaps during the first seconds of the cylinder experiment, worker
+    // against this thread. The M14 gap: this was main-thread-only before.
+    const gapsDuring = async (query) => {
+      const app = await openApp(browser, server.url + query);
+      const { page } = app;
+      try {
+        await page.selectOption("#experiment", "cylinder");
+        await page.click("#expstart");
+        await page.waitForFunction(() => window.__flowlab.session.iteration >= 3, null, { timeout: 60000 });
+        await page.evaluate(() => {
+          window.__gaps = [];
+          let last = performance.now();
+          const loop = () => {
+            const now = performance.now();
+            window.__gaps.push(now - last);
+            last = now;
+            if (window.__gaps.length < 400 && !window.__stopGaps) requestAnimationFrame(loop);
+          };
+          requestAnimationFrame(loop);
+        });
+        await page.waitForTimeout(3000);
+        const p95 = await page.evaluate(() => {
+          window.__stopGaps = true;
+          const gaps = window.__gaps.slice(3).sort((a, b) => a - b);
+          return gaps[Math.floor(gaps.length * 0.95)];
+        });
+        await page.click("#expstop");
+        app.assertNoErrors(query || "worker");
+        return p95;
+      } finally {
+        await page.close();
+      }
+    };
+    const worker = await gapsDuring("");
+    const main = await gapsDuring("?compute=main");
+    console.log(`[M14] p95 frame gap during the cylinder experiment: ${worker.toFixed(0)} ms worker, ${main.toFixed(0)} ms main thread`);
+    assert.ok(worker < main / 2, `p95 frame gap during an experiment: ${worker.toFixed(0)} ms worker, ${main.toFixed(0)} ms main thread`);
   });
 });
