@@ -1,0 +1,800 @@
+{
+  "version": 1,
+  "order": [
+    "p-sign",
+    "p-cafe",
+    "p-plotter",
+    "p-sched",
+    "p-syllabus",
+    "p-fluid",
+    "p-clubster",
+    "p-more"
+  ],
+  "projects": {
+    "p-sign": {
+      "slot": "p-sign",
+      "title": "AI Sign Language Translator",
+      "blurb": "Real-time sign language detection using Computer Vision and NLP.",
+      "cat": "AI / ML",
+      "slotHint": "Drop a screenshot of the translator",
+      "status": "LIVE",
+      "tags": [
+        "Python",
+        "OpenCV",
+        "MediaPipe"
+      ],
+      "subtitle": "Real-time sign language recognition with computer vision and NLP",
+      "writeup": [
+        "The system captures a live camera feed and tracks 21 hand landmarks per hand using MediaPipe Hands. Landmark coordinates are normalized against wrist position and hand scale, then fed into a classifier trained on isolated sign gestures.",
+        "A sliding window buffers landmark sequences over roughly 1.2 seconds so the classifier can distinguish static letter signs from short dynamic gestures (motion-based signs like \"J\" or \"Z\"). Predictions are smoothed with a majority vote across the window before being emitted as text.",
+        "A lightweight NLP layer sits on top of the raw letter/word stream: it corrects common misreads, inserts word boundaries when the hand pauses, and gives basic sentence casing before the transcript is spoken aloud or displayed."
+      ],
+      "equations": [
+        {
+          "label": "Landmark normalization",
+          "tex": "\\hat{p}_i = \\frac{p_i - p_{wrist}}{\\lVert p_{middle\\_mcp} - p_{wrist} \\rVert}"
+        },
+        {
+          "label": "Temporal smoothing (majority vote over window W)",
+          "tex": "\\hat{y}_t = \\underset{c}{\\mathrm{argmax}} \\sum_{i=t-W}^{t} \\mathbb{1}[y_i = c]"
+        }
+      ],
+      "images": [
+        {
+          "id": "p-sign-detail-1",
+          "hint": "Drop a screenshot of the live hand-tracking overlay"
+        },
+        {
+          "id": "p-sign-detail-2",
+          "hint": "Drop a screenshot of the transcript output panel"
+        }
+      ],
+      "clips": [],
+      "specs": [
+        [
+          "Input",
+          "720p webcam, 30fps"
+        ],
+        [
+          "Hand tracking",
+          "MediaPipe Hands (21 landmarks/hand)"
+        ],
+        [
+          "Classifier",
+          "Random Forest, 42-dim normalized landmark vector"
+        ],
+        [
+          "Latency",
+          "~110ms landmark-to-prediction"
+        ],
+        [
+          "Vocabulary",
+          "ASL alphabet + 24 common words"
+        ]
+      ],
+      "timeline": [
+        [
+          "Week 1",
+          "Hand landmark pipeline + data collection"
+        ],
+        [
+          "Week 2",
+          "Static-letter classifier, 91% held-out accuracy"
+        ],
+        [
+          "Week 3",
+          "Dynamic gesture window + smoothing"
+        ],
+        [
+          "Week 4",
+          "NLP cleanup layer, UI, ship"
+        ]
+      ],
+      "chart": {
+        "kind": "bars",
+        "title": "Per-letter recognition accuracy (sample)",
+        "data": [
+          [
+            "A",
+            96
+          ],
+          [
+            "B",
+            91
+          ],
+          [
+            "C",
+            88
+          ],
+          [
+            "M",
+            79
+          ],
+          [
+            "S",
+            82
+          ],
+          [
+            "Y",
+            90
+          ]
+        ]
+      },
+      "fonts": {
+        "heading": "JetBrains Mono",
+        "body": "JetBrains Mono"
+      }
+    },
+    "p-cafe": {
+      "slot": "p-cafe",
+      "title": "Gaming Café Management",
+      "blurb": "Full-stack web app for booking, admin panel, and dashboard.",
+      "cat": "WEB APPS",
+      "slotHint": "Drop a screenshot of the dashboard",
+      "status": "LIVE",
+      "tags": [
+        "Django",
+        "PostgreSQL",
+        "Tailwind"
+      ],
+      "subtitle": "Full-stack booking, billing and admin dashboard",
+      "writeup": [
+        "Built to replace a paper logbook at a local gaming café: customers book a station slot, staff check them in, and billing accrues automatically by the minute against a per-station hourly rate.",
+        "The admin dashboard gives station occupancy at a glance, daily/weekly revenue, and a simple inventory view for snacks and drinks sold alongside session time.",
+        "Session state (idle / active / overdue) is computed server-side on each request rather than polled by a background job, keeping the deployment to a single Django process plus Postgres."
+      ],
+      "equations": [
+        {
+          "label": "Session bill",
+          "tex": "B = r \\cdot \\left\\lceil \\frac{t_{end} - t_{start}}{60} \\right\\rceil + \\sum_{k} q_k c_k"
+        }
+      ],
+      "images": [
+        {
+          "id": "p-cafe-detail-1",
+          "hint": "Drop a screenshot of the station dashboard"
+        },
+        {
+          "id": "p-cafe-detail-2",
+          "hint": "Drop a screenshot of the billing screen"
+        }
+      ],
+      "clips": [],
+      "specs": [
+        [
+          "Backend",
+          "Django 4, Django REST Framework"
+        ],
+        [
+          "Database",
+          "PostgreSQL"
+        ],
+        [
+          "Frontend",
+          "Tailwind CSS, server-rendered templates"
+        ],
+        [
+          "Auth",
+          "Role-based: staff vs. admin"
+        ],
+        [
+          "Stations tracked",
+          "Up to 40 concurrently"
+        ]
+      ],
+      "timeline": [
+        [
+          "Week 1",
+          "Data model: stations, sessions, customers"
+        ],
+        [
+          "Week 2",
+          "Booking + check-in flow"
+        ],
+        [
+          "Week 3",
+          "Billing engine + inventory"
+        ],
+        [
+          "Week 4",
+          "Admin dashboard + deploy"
+        ]
+      ],
+      "chart": {
+        "kind": "bars",
+        "title": "Average daily station utilization",
+        "data": [
+          [
+            "Mon",
+            42
+          ],
+          [
+            "Tue",
+            38
+          ],
+          [
+            "Wed",
+            45
+          ],
+          [
+            "Thu",
+            50
+          ],
+          [
+            "Fri",
+            78
+          ],
+          [
+            "Sat",
+            94
+          ],
+          [
+            "Sun",
+            88
+          ]
+        ]
+      },
+      "fonts": {
+        "heading": "JetBrains Mono",
+        "body": "JetBrains Mono"
+      }
+    },
+    "p-plotter": {
+      "slot": "p-plotter",
+      "title": "Auto Write Plotter",
+      "blurb": "A pen plotter that writes by hand. Built for precision and fun.",
+      "cat": "HARDWARE",
+      "slotHint": "Drop a photo of the plotter",
+      "status": "WIP",
+      "tags": [
+        "Arduino",
+        "G-Code",
+        "Mechanics"
+      ],
+      "subtitle": "A pen plotter that reproduces handwriting on paper",
+      "writeup": [
+        "A two-motor CoreXY gantry moves a servo-lifted pen over a fixed sheet. Input text is converted to a stroke path using a single-line (\"hairline\") font, then to G-code, then interpreted on an Arduino driving two NEMA17 steppers.",
+        "The mechanical design prioritizes reduced backlash over top speed — belt tension and pen-lift timing are what limit handwriting fidelity, not step resolution.",
+        "Pen-up moves are routed as the shortest connecting path between strokes to keep total plot time down without dragging ink between letters."
+      ],
+      "equations": [
+        {
+          "label": "CoreXY kinematics",
+          "tex": "\\begin{aligned} \\theta_A &= x + y \\\\ \\theta_B &= x - y \\end{aligned}"
+        },
+        {
+          "label": "Steps per mm",
+          "tex": "S = \\frac{\\text{steps/rev} \\times \\text{microstepping}}{\\text{pulley teeth} \\times \\text{belt pitch (mm)}}"
+        }
+      ],
+      "images": [
+        {
+          "id": "p-plotter-detail-1",
+          "hint": "Drop a photo of the gantry / pen carriage"
+        },
+        {
+          "id": "p-plotter-detail-2",
+          "hint": "Drop a photo of a finished handwritten page"
+        }
+      ],
+      "clips": [],
+      "specs": [
+        [
+          "Motion",
+          "CoreXY, 2x NEMA17 steppers"
+        ],
+        [
+          "Controller",
+          "Arduino Uno + GRBL-derived firmware"
+        ],
+        [
+          "Pen lift",
+          "SG90 servo"
+        ],
+        [
+          "Work area",
+          "210mm x 297mm (A4)"
+        ],
+        [
+          "Resolution",
+          "~0.05mm/step"
+        ]
+      ],
+      "timeline": [
+        [
+          "Week 1-2",
+          "Frame + CoreXY build"
+        ],
+        [
+          "Week 3",
+          "Firmware + G-code streaming"
+        ],
+        [
+          "Week 4",
+          "Font-to-stroke pipeline"
+        ],
+        [
+          "Ongoing",
+          "Tuning pen pressure & pen-lift timing"
+        ]
+      ],
+      "chart": {
+        "kind": "bars",
+        "title": "Plot time by page density (relative)",
+        "data": [
+          [
+            "Sparse",
+            1
+          ],
+          [
+            "Note",
+            1.6
+          ],
+          [
+            "Dense",
+            2.4
+          ],
+          [
+            "Full page",
+            3.1
+          ]
+        ]
+      },
+      "fonts": {
+        "heading": "JetBrains Mono",
+        "body": "JetBrains Mono"
+      }
+    },
+    "p-sched": {
+      "slot": "p-sched",
+      "title": "School Scheduler",
+      "blurb": "Smart timetable generator for school classes.",
+      "cat": "TOOLS",
+      "slotHint": "Drop a screenshot of the scheduler",
+      "status": "WIP",
+      "tags": [
+        "Python",
+        "Algorithm",
+        "UI/UX"
+      ],
+      "subtitle": "Smart timetable generator for school classes",
+      "writeup": [
+        "Given a list of classes, teachers, rooms and constraints (teacher availability, room capacity, subject-period limits), the scheduler searches for a conflict-free weekly timetable.",
+        "The core is a constraint-satisfaction search with backtracking, ordered by most-constrained-variable first, which converges much faster than plain brute force on real school-sized inputs.",
+        "A simple UI lets an admin adjust constraints and re-run generation, with clashes highlighted directly on the draft timetable rather than buried in a log."
+      ],
+      "equations": [
+        {
+          "label": "Hard constraint: no teacher double-booked",
+          "tex": "\\forall t, \\; \\forall (c_i, c_j) \\text{ with same teacher}: \\; slot(c_i) \\neq slot(c_j)"
+        }
+      ],
+      "images": [
+        {
+          "id": "p-sched-detail-1",
+          "hint": "Drop a screenshot of the draft timetable"
+        }
+      ],
+      "clips": [],
+      "specs": [
+        [
+          "Algorithm",
+          "Backtracking CSP, MCV heuristic"
+        ],
+        [
+          "Input",
+          "CSV of classes, teachers, rooms"
+        ],
+        [
+          "UI",
+          "Python (Streamlit-style) web view"
+        ],
+        [
+          "Typical solve time",
+          "<3s for a 30-class school"
+        ]
+      ],
+      "timeline": [
+        [
+          "Week 1",
+          "Constraint model"
+        ],
+        [
+          "Week 2",
+          "Backtracking solver"
+        ],
+        [
+          "Week 3",
+          "UI + clash visualization"
+        ]
+      ],
+      "chart": {
+        "kind": "bars",
+        "title": "Solve time vs. class count",
+        "data": [
+          [
+            "10",
+            0.2
+          ],
+          [
+            "20",
+            0.6
+          ],
+          [
+            "30",
+            1.4
+          ],
+          [
+            "40",
+            3.8
+          ]
+        ]
+      },
+      "fonts": {
+        "heading": "JetBrains Mono",
+        "body": "JetBrains Mono"
+      }
+    },
+    "p-syllabus": {
+      "slot": "p-syllabus",
+      "title": "Exam Syllabus Scheduler",
+      "blurb": "Plan your syllabus, track progress, and never fall behind.",
+      "cat": "TOOLS",
+      "slotHint": "Drop a screenshot of the tracker",
+      "status": "WIP",
+      "tags": [
+        "Python",
+        "Streamlit",
+        "SQLite"
+      ],
+      "subtitle": "Plan your syllabus, track progress, never fall behind",
+      "writeup": [
+        "Takes a syllabus broken into topics with rough time estimates and an exam date, then distributes daily study targets so every topic is covered with buffer days left before the exam.",
+        "Progress is logged daily; if a day is missed, the remaining plan is automatically rebalanced across the remaining days rather than just pushed to the end.",
+        "A small SQLite database keeps history across exams so the app can show which subjects tend to slip and need more buffer next time."
+      ],
+      "equations": [
+        {
+          "label": "Daily target after rebalancing",
+          "tex": "d_{today} = \\frac{\\text{topics remaining}}{\\text{days remaining} - \\text{buffer}}"
+        }
+      ],
+      "images": [
+        {
+          "id": "p-syllabus-detail-1",
+          "hint": "Drop a screenshot of the progress tracker"
+        }
+      ],
+      "clips": [],
+      "specs": [
+        [
+          "Frontend",
+          "Streamlit"
+        ],
+        [
+          "Storage",
+          "SQLite"
+        ],
+        [
+          "Rebalancing",
+          "Runs on every missed-day check-in"
+        ]
+      ],
+      "timeline": [
+        [
+          "Week 1",
+          "Data model + plan generator"
+        ],
+        [
+          "Week 2",
+          "Progress tracking + rebalancing"
+        ],
+        [
+          "Week 3",
+          "History view across past exams"
+        ]
+      ],
+      "chart": {
+        "kind": "bars",
+        "title": "Topics covered vs. days elapsed",
+        "data": [
+          [
+            "D5",
+            8
+          ],
+          [
+            "D10",
+            19
+          ],
+          [
+            "D15",
+            29
+          ],
+          [
+            "D20",
+            41
+          ]
+        ]
+      },
+      "fonts": {
+        "heading": "JetBrains Mono",
+        "body": "JetBrains Mono"
+      }
+    },
+    "p-fluid": {
+      "slot": "p-fluid",
+      "title": "FlowLab",
+      "blurb": "Explore fluid dynamics through simulations and visualizations.",
+      "cat": "WEB APPS",
+      "slotHint": "Drop a simulation frame",
+      "status": "WIP",
+      "tags": [
+        "Python",
+        "NumPy",
+        "Matplotlib",
+        "Fluid"
+      ],
+      "subtitle": "Exploring fluid dynamics through simulation and visualization",
+      "writeup": [
+        "A 2D incompressible flow solver on a staggered grid, using a projection method: an explicit advection-diffusion step followed by a pressure-correction step that enforces the divergence-free condition.",
+        "Visualization renders velocity as streamlines and vorticity as a colormap, letting simple setups like flow past a cylinder or a lid-driven cavity be explored interactively.",
+        "Planned next: a semi-Lagrangian advection scheme to allow larger timesteps without the current explicit scheme's CFL restriction."
+      ],
+      "equations": [
+        {
+          "label": "Incompressible Navier–Stokes",
+          "tex": "\\frac{\\partial \\mathbf{u}}{\\partial t} + (\\mathbf{u}\\cdot\\nabla)\\mathbf{u} = -\\frac{1}{\\rho}\\nabla p + \\nu \\nabla^2 \\mathbf{u}"
+        },
+        {
+          "label": "Incompressibility constraint",
+          "tex": "\\nabla \\cdot \\mathbf{u} = 0"
+        },
+        {
+          "label": "Pressure Poisson equation (projection step)",
+          "tex": "\\nabla^2 p = \\frac{\\rho}{\\Delta t} \\nabla \\cdot \\mathbf{u}^{*}"
+        }
+      ],
+      "images": [
+        {
+          "id": "p-fluid-detail-1",
+          "hint": "Drop a simulation frame (streamlines)"
+        },
+        {
+          "id": "p-fluid-detail-2",
+          "hint": "Drop a vorticity colormap frame"
+        }
+      ],
+      "clips": [],
+      "specs": [
+        [
+          "Method",
+          "Projection method, staggered MAC grid"
+        ],
+        [
+          "Grid",
+          "128x128 (planned)"
+        ],
+        [
+          "Language",
+          "Python + NumPy"
+        ],
+        [
+          "Status",
+          "Solver design in progress, not yet running"
+        ]
+      ],
+      "timeline": [
+        [
+          "Planned",
+          "Grid + advection-diffusion step"
+        ],
+        [
+          "Planned",
+          "Pressure projection"
+        ],
+        [
+          "Planned",
+          "Streamline + vorticity rendering"
+        ]
+      ],
+      "chart": {
+        "kind": "bars",
+        "title": "Target grid resolutions under consideration",
+        "data": [
+          [
+            "64x64",
+            1
+          ],
+          [
+            "128x128",
+            4
+          ],
+          [
+            "256x256",
+            16
+          ]
+        ]
+      },
+      "fonts": {
+        "heading": "JetBrains Mono",
+        "body": "JetBrains Mono"
+      }
+    },
+    "p-clubster": {
+      "slot": "p-clubster",
+      "title": "Clubster",
+      "blurb": "Reads class timetables and tells clubs when they can actually meet.",
+      "cat": "WEB APPS",
+      "slotHint": "Drop a screenshot of the Discover feed or the timetable upload screen",
+      "status": "WIP",
+      "tags": [
+        "Flutter",
+        "FastAPI",
+        "Supabase"
+      ],
+      "subtitle": "A scheduler that finds when a whole club is actually free to meet",
+      "writeup": [
+        {
+          "type": "p",
+          "text": "Most college clubs schedule a meeting by texting a few sections and guessing a time that might work. Clubster replaces the guess: it reads every target section's class timetable, merges everyone's busy hours into one timeline, and surfaces the actual windows an event could use."
+        },
+        {
+          "type": "h",
+          "text": "How the suggestion works"
+        },
+        {
+          "type": "p",
+          "text": "Each section's timetable is merged into a single busy interval set with a sweep-line pass. What remains after subtracting the college day becomes the candidate gaps. Gaps are scored by \\emph{weighted turnout percentage}, not raw headcount, so a small section at high attendance correctly outranks a large section at low attendance. Members marked \\code{required} for an event — officers, organisers — act as a hard filter: a gap where they're unavailable is dropped outright, never just scored lower."
+        },
+        {
+          "type": "note",
+          "text": "The system suggests. The admin always decides."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Timetables are uploaded as a photo or PDF and parsed into structured JSON by an LLM, with an admin preview step before anything is saved.",
+            "Events carry three visibility levels: club-only, open to the college, or open to other colleges.",
+            "Two clubs booking the same venue or overlapping audience get flagged automatically, with the numbers shown to both admins."
+          ]
+        },
+        {
+          "type": "quote",
+          "text": "A club that has to remember to schedule is a club that eventually stops meeting.",
+          "by": "project note, week 1"
+        },
+        {
+          "type": "p",
+          "text": "Code is public on \\link{GitHub}{https://github.com/Arnavverma325/clubster}, licensed AGPL-3.0."
+        }
+      ],
+      "equations": [
+        {
+          "label": "Weighted turnout score for a candidate gap",
+          "tex": "\\text{score} = \\frac{\\sum_{u \\in \\text{free}} w(u)}{\\sum_{u \\in \\text{invited}} w(u)} \\times 100"
+        }
+      ],
+      "images": [
+        {
+          "id": "p-clubster-discover",
+          "hint": "Drop a screenshot of the Discover feed showing open events"
+        },
+        {
+          "id": "p-clubster-upload",
+          "hint": "Drop a screenshot of the timetable upload and parse-preview screen"
+        },
+        {
+          "id": "p-clubster-schema",
+          "hint": "Drop a screenshot of the Supabase table view or schema diagram"
+        }
+      ],
+      "clips": [],
+      "specs": [
+        [
+          "Frontend",
+          "Flutter"
+        ],
+        [
+          "Backend",
+          "FastAPI, Python"
+        ],
+        [
+          "Database",
+          "Supabase, Postgres"
+        ],
+        [
+          "Parsing",
+          "LLM timetable-to-JSON"
+        ],
+        [
+          "License",
+          "AGPL-3.0"
+        ]
+      ],
+      "timeline": [
+        [
+          "Week 1",
+          "Scheduling logic, priority weighting, and data model designed"
+        ],
+        [
+          "Week 1-2",
+          "Full database schema and scheduling algorithm built and tested"
+        ],
+        [
+          "Week 2",
+          "Timetable upload and AI-parsing pipeline built"
+        ],
+        [
+          "Ongoing",
+          "Admin dashboard, attendance, and budget modules"
+        ],
+        [
+          "Planned",
+          "Pilot with KMC Astronomy Club, then multi-college rollout"
+        ]
+      ],
+      "chart": null,
+      "fonts": {
+        "heading": "JetBrains Mono",
+        "body": "Lora"
+      }
+    },
+    "p-more": {
+      "slot": "p-more",
+      "title": "More Experiments",
+      "blurb": "Robotics, hardware experiments, and ideas in progress.",
+      "cat": "HARDWARE",
+      "slotHint": "Drop a photo of the bench",
+      "status": "PLANNED",
+      "tags": [
+        "Lab Notebook"
+      ],
+      "subtitle": "Robotics, hardware experiments and ideas in progress",
+      "writeup": [
+        "A running notebook of smaller builds that don't yet warrant their own project page: motor driver tests, sensor breakouts, and mechanism sketches.",
+        "Entries get promoted to their own project page once they have a defined goal and enough working parts to show."
+      ],
+      "equations": [],
+      "images": [
+        {
+          "id": "p-more-detail-1",
+          "hint": "Drop a photo of the workbench"
+        }
+      ],
+      "clips": [],
+      "specs": [
+        [
+          "Format",
+          "Rolling lab notebook, no fixed scope"
+        ]
+      ],
+      "timeline": [
+        [
+          "Ongoing",
+          "New entries as experiments happen"
+        ]
+      ],
+      "chart": null,
+      "fonts": {
+        "heading": "JetBrains Mono",
+        "body": "JetBrains Mono"
+      }
+    }
+  },
+  "deleted": [],
+  "ads": {
+    "enabled": false,
+    "frame": {
+      "img": "",
+      "href": "",
+      "name": "",
+      "line": ""
+    },
+    "tv": {
+      "video": "",
+      "href": "",
+      "name": "",
+      "line": ""
+    }
+  }
+}
